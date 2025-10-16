@@ -1,0 +1,444 @@
+"""Streaming response handling for low-latency communication.
+
+This module implements true streaming where LangGraph chunks are immediately
+forwarded to Slack as they arrive, minimizing latency.
+"""
+
+import logging
+import asyncio
+from typing import Optional
+
+from ..config import MessageContext
+from ..transformers import TransformerChain
+from ..utils import clean_markdown
+from .base import BaseHandler
+
+logger = logging.getLogger(__name__)
+
+
+class StreamingHandler(BaseHandler):
+    """Handles streaming message processing with immediate chunk forwarding.
+
+    This handler provides true low-latency streaming:
+    - LangGraph chunk arrives → immediately sent to Slack
+    - No waiting for complete response
+    - Better user experience with instant feedback
+
+    Flow:
+    1. Apply input transformers
+    2. Start Slack stream
+    3. Stream from LangGraph, forwarding each chunk immediately
+    4. Stop Slack stream with optional images/blocks
+    """
+
+    def __init__(
+        self,
+        langgraph_client,
+        slack_client,
+        assistant_id: str,
+        input_transformers: TransformerChain,
+        output_transformers: TransformerChain,
+        reply_in_thread: bool = True,
+        show_feedback_buttons: bool = True,
+        show_thread_id: bool = True,
+        max_image_blocks: int = 5,
+    ):
+        """Initialize streaming handler.
+
+        Args:
+            langgraph_client: LangGraph SDK client instance
+            slack_client: Slack Bolt AsyncApp client
+            assistant_id: LangGraph assistant ID
+            input_transformers: Chain of input transformers
+            output_transformers: Chain of output transformers
+            reply_in_thread: Reply in thread vs main channel (default: True)
+            show_feedback_buttons: Whether to show feedback buttons (default: True)
+            show_thread_id: Whether to show thread_id in footer (default: True)
+            max_image_blocks: Maximum number of image blocks to include (default: 5)
+        """
+        # Initialize base class
+        super().__init__(
+            assistant_id=assistant_id,
+            input_transformers=input_transformers,
+            output_transformers=output_transformers,
+            show_feedback_buttons=show_feedback_buttons,
+            show_thread_id=show_thread_id,
+            max_image_blocks=max_image_blocks,
+        )
+        # Store handler-specific attributes
+        self.langgraph_client = langgraph_client
+        self.slack_client = slack_client
+        self.reply_in_thread = reply_in_thread
+
+    async def process_message(
+        self,
+        message: str,
+        context: MessageContext,
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """Process message with streaming.
+
+        Main entry point for streaming message processing.
+        Sends response directly to Slack via streaming.
+
+        Args:
+            message: Raw message text from Slack
+            context: Message context with user/channel info
+
+        Returns:
+            Tuple of (stream_ts, thread_id, run_id) for feedback tracking
+        """
+        logger.info(f"Streaming message from user {context.user_id} in channel {context.channel_id}")
+
+        # Step 1: Apply input transformers
+        transformed_input = await self._apply_input_transforms(message, context)
+
+        # Step 2: Create thread ID
+        thread_timestamp = self._determine_thread_timestamp(context)
+        langgraph_thread = self._create_thread_id(context.channel_id, thread_timestamp)
+        logger.info(f"Using LangGraph thread: {langgraph_thread}")
+
+        # Step 3: Get team ID for Slack streaming API
+        team_id = await self._get_team_id()
+
+        # Step 4: Determine thread_ts based on reply_in_thread setting
+        if self.reply_in_thread:
+            # Always reply in thread (use message ts if not already in thread)
+            slack_thread_ts = context.thread_ts or context.message_ts
+        else:
+            # Only reply in thread if message was already in a thread
+            slack_thread_ts = context.thread_ts
+
+        # Step 5: Start Slack stream
+        stream_ts = await self._start_slack_stream(
+            channel_id=context.channel_id,
+            thread_ts=slack_thread_ts,
+            user_id=context.user_id,
+            team_id=team_id,
+        )
+        logger.info(f"Started Slack stream with ts: {stream_ts}")
+
+        # Step 6: Stream from LangGraph and forward to Slack
+        # CRITICAL: Each chunk is sent immediately as it arrives
+        complete_response, run_id = await self._stream_from_langgraph_to_slack(
+            message=transformed_input,
+            langgraph_thread=langgraph_thread,
+            slack_channel=context.channel_id,
+            slack_stream_ts=stream_ts,
+            context=context,
+        )
+
+        # Step 7: Stop stream with optional image blocks
+        await self._stop_slack_stream(
+            channel_id=context.channel_id,
+            stream_ts=stream_ts,
+            complete_response=complete_response,
+            thread_id=langgraph_thread,
+        )
+
+        logger.info(f"Completed streaming for thread {langgraph_thread}")
+
+        return stream_ts, langgraph_thread, run_id
+
+    async def _stream_from_langgraph_to_slack(
+        self,
+        message: str,
+        langgraph_thread: str,
+        slack_channel: str,
+        slack_stream_ts: str,
+        context: MessageContext,
+    ) -> tuple[str, Optional[str]]:
+        """Stream from LangGraph to Slack with immediate forwarding.
+
+        THIS IS THE CRITICAL LOW-LATENCY PART:
+        - Iterate over LangGraph stream
+        - Each chunk arrives → immediately send to Slack
+        - No buffering, no waiting
+
+        Args:
+            message: Transformed message to send to LangGraph
+            langgraph_thread: LangGraph thread ID
+            slack_channel: Slack channel ID
+            slack_stream_ts: Slack stream timestamp
+            context: Message context for output transforms
+
+        Returns:
+            Tuple of (complete_response, run_id)
+        """
+        complete_response = ""
+        chunk_count = 0
+        run_id = None
+
+        try:
+            # Start streaming from LangGraph
+            # stream_mode="messages-tuple" gives us incremental message updates as tuples
+            async for chunk in self.langgraph_client.runs.stream(
+                thread_id=langgraph_thread,
+                assistant_id=self.assistant_id,
+                input={
+                    "messages": [{"role": "user", "content": message}]
+                },
+                stream_mode=["messages-tuple"],
+                multitask_strategy="interrupt",
+                if_not_exists="create",
+            ):
+                chunk_count += 1
+                logger.info(f"Chunk #{chunk_count}: event={chunk.event}")
+
+                # Capture run_id from metadata chunks (appears before message chunks)
+                if run_id is None:
+                    # Check if this is a metadata event with run_id
+                    if hasattr(chunk, "data") and isinstance(chunk.data, dict) and "run_id" in chunk.data:
+                        run_id = chunk.data["run_id"]
+                        logger.info(f"Captured run_id from chunk.data: {run_id}")
+
+                # Only process message chunks (skip metadata/other events)
+                if chunk.event != "messages":
+                    logger.info(f"Chunk #{chunk_count}: skipping non-message event")
+                    continue
+
+                # Extract message data from chunk - it's a tuple!
+                message_data, _msg_metadata = chunk.data
+                msg_type = message_data.get("type", "")
+                logger.info(f"Chunk #{chunk_count}: message type={msg_type}")
+
+                # Skip non-AI messages (check for both "ai" and "AIMessageChunk")
+                if not (msg_type == "ai" or msg_type == "AIMessageChunk"):
+                    logger.info(f"Chunk #{chunk_count}: skipping non-AI message")
+                    continue
+
+                # Get content from the chunk
+                content = message_data.get("content", "")
+                logger.info(f"Chunk #{chunk_count}: content preview={str(content)[:100]}")
+
+                if not content:
+                    logger.info(f"Chunk #{chunk_count}: no content")
+                    continue
+
+                # Handle both string and list content
+                if isinstance(content, list):
+                    content = "".join([block.get("text", "") for block in content if block.get("type") == "text"])
+                    logger.info(f"Chunk #{chunk_count}: extracted from list, length={len(content)}")
+
+                # Skip empty content
+                if not content.strip():
+                    logger.debug(f"Chunk #{chunk_count}: content is empty after strip")
+                    continue
+
+                # Track complete response for image extraction
+                # IMPORTANT: Accumulate chunks, don't replace!
+                complete_response += content
+                logger.info(f"Chunk #{chunk_count}: sending {len(content)} chars to Slack (total accumulated: {len(complete_response)})")
+
+                # CRITICAL: Immediately send to Slack
+                # This is where low latency happens - no waiting!
+                await self._append_to_slack_stream(
+                    channel_id=slack_channel,
+                    stream_ts=slack_stream_ts,
+                    content=content,
+                )
+
+            logger.info(f"Stream completed: processed {chunk_count} total chunks")
+
+        except Exception as e:
+            logger.error(f"Error during streaming: {e}", exc_info=True)
+            # Try to append error message to stream
+            try:
+                await self._append_to_slack_stream(
+                    channel_id=slack_channel,
+                    stream_ts=slack_stream_ts,
+                    content="\n\n_Error: Unable to complete response_",
+                )
+            except:
+                pass  # Best effort
+
+        # Apply output transformers to complete response
+        # Note: We transform the complete response, not individual chunks
+        # This ensures transformers see the full context
+        if complete_response:
+            logger.info(f"Complete response before output transforms (length={len(complete_response)}): {complete_response[:200]}...")
+            complete_response = await self.output_transformers.apply(
+                complete_response,
+                context
+            )
+            logger.info(f"Complete response after output transforms (length={len(complete_response)}): {complete_response[:200]}...")
+
+        if run_id:
+            logger.info(f"Returning complete response with run_id: {run_id}")
+        else:
+            logger.warning("No run_id captured during streaming!")
+
+        return complete_response, run_id
+
+    async def _start_slack_stream(
+        self,
+        channel_id: str,
+        thread_ts: Optional[str],
+        user_id: str,
+        team_id: str,
+    ) -> str:
+        """Start a Slack stream.
+
+        Args:
+            channel_id: Slack channel ID
+            thread_ts: Slack thread timestamp (None if not in thread)
+            user_id: Slack user ID (recipient)
+            team_id: Slack team/workspace ID
+
+        Returns:
+            Stream timestamp (message_ts) for subsequent operations
+
+        Raises:
+            Exception: If stream start fails
+        """
+        try:
+            response = await self.slack_client.client.chat_startStream(
+                channel=channel_id,
+                recipient_team_id=team_id,
+                recipient_user_id=user_id,
+                thread_ts=thread_ts,
+            )
+            return response["ts"]
+
+        except Exception as e:
+            logger.error(f"Failed to start Slack stream: {e}", exc_info=True)
+            raise
+
+    async def _append_to_slack_stream(
+        self,
+        channel_id: str,
+        stream_ts: str,
+        content: str,
+    ) -> None:
+        """Append content to an active Slack stream.
+
+        Args:
+            channel_id: Slack channel ID
+            stream_ts: Stream timestamp
+            content: Content to append (will be converted to Slack markdown)
+        """
+        try:
+            # Clean markdown for Slack format
+            slack_content = clean_markdown(content)
+
+            # Append to stream
+            await self.slack_client.client.chat_appendStream(
+                channel=channel_id,
+                ts=stream_ts,
+                markdown_text=slack_content,
+            )
+
+        except Exception as e:
+            # Log but don't raise - we want to continue streaming
+            logger.warning(f"Failed to append to stream: {e}")
+
+    async def _stop_slack_stream(
+        self,
+        channel_id: str,
+        stream_ts: str,
+        complete_response: str,
+        thread_id: str = None,
+    ) -> None:
+        """Stop Slack stream and add optional blocks (images, buttons).
+
+        Note: Slack's chat.stopStream doesn't support blocks in threads, so we:
+        1. Stop the stream without blocks
+        2. Update the message with blocks using chat.update
+
+        Args:
+            channel_id: Slack channel ID
+            stream_ts: Stream timestamp
+            complete_response: Complete accumulated response (for image extraction)
+            thread_id: Optional LangGraph thread ID to include in feedback footer
+        """
+        try:
+            # Log the complete response for debugging
+            logger.info(f"Stopping stream with complete_response (length={len(complete_response)})")
+            logger.debug(f"Complete response content: {complete_response}")
+
+            # Create blocks (images + feedback)
+            blocks = self._create_blocks(complete_response, thread_id)
+
+            # Stop the stream without blocks
+            await self.slack_client.client.chat_stopStream(
+                channel=channel_id,
+                ts=stream_ts,
+            )
+
+            logger.info("Stream stopped")
+
+            # If we have blocks to add, update the message
+            if blocks:
+                # Small delay to ensure Slack has processed the stream stop
+                await asyncio.sleep(0.5)
+
+                # Get the current message text for the fallback
+                slack_text = clean_markdown(complete_response)
+
+                # Create a text block with the response
+                text_block = {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": slack_text
+                    }
+                }
+
+                # Prepend text block to other blocks
+                all_blocks = [text_block] + blocks
+
+                try:
+                    # Update the message with blocks
+                    await self.slack_client.client.chat_update(
+                        channel=channel_id,
+                        ts=stream_ts,
+                        text=slack_text,  # Fallback text for notifications
+                        blocks=all_blocks,
+                    )
+
+                    logger.info(f"Updated message with {len(all_blocks)} blocks")
+
+                except Exception as block_error:
+                    # If updating with blocks fails (e.g., image download issues),
+                    # fall back to just the text and feedback blocks without images
+                    logger.warning(f"Failed to update with all blocks: {block_error}")
+                    logger.info("Retrying with feedback blocks only (no images)")
+
+                    # Get only feedback blocks (no image blocks)
+                    from ..utils import create_feedback_block
+                    feedback_only_blocks = create_feedback_block(
+                        thread_id=thread_id,
+                        show_feedback_buttons=self.show_feedback_buttons,
+                        show_thread_id=self.show_thread_id,
+                    )
+
+                    # Try again with just text and feedback
+                    try:
+                        await self.slack_client.client.chat_update(
+                            channel=channel_id,
+                            ts=stream_ts,
+                            text=slack_text,
+                            blocks=[text_block] + feedback_only_blocks,
+                        )
+                        logger.info("Successfully updated with text and feedback only")
+                    except Exception as fallback_error:
+                        logger.error(f"Failed even with feedback-only blocks: {fallback_error}")
+
+        except Exception as e:
+            logger.error(f"Failed to stop stream: {e}", exc_info=True)
+
+    async def _get_team_id(self) -> str:
+        """Get Slack team/workspace ID.
+
+        Returns:
+            Team ID string
+
+        Raises:
+            Exception: If auth test fails
+        """
+        try:
+            auth_info = await self.slack_client.client.auth_test()
+            return auth_info["team_id"]
+
+        except Exception as e:
+            logger.error(f"Failed to get team ID: {e}", exc_info=True)
+            raise
