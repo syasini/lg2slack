@@ -1,0 +1,70 @@
+# Slack App Manifest for lg2slack
+#
+# This manifest can be used to create your Slack app automatically.
+# Go to https://api.slack.com/apps and click "Create New App" -> "From a manifest"
+#
+# IMPORTANT: Replace the placeholder values before using:
+# - your-app-name: Your app's display name
+# - your-bot-name: Your bot's display name
+# - request_url: See below for local vs production setup
+
+display_information:
+  name: your-app-name  # Replace with your app name (e.g., "My LangGraph Bot")
+  description: your-app-description  # Replace with description (e.g., "AI assistant powered by LangGraph")
+  background_color: "#2c2d30"
+
+features:
+  bot_user:
+    display_name: your-bot-name  # Replace with bot display name (e.g., "MyBot")
+    always_online: true
+  assistant_view:
+    assistant_description: your-assistant-description  # Replace with assistant description (e.g., "AI-powered assistant")
+
+oauth_config:
+  scopes:
+    bot:
+      # Read permissions
+      - app_mentions:read      # View when bot is @mentioned
+      - channels:history       # View messages in public channels
+      - channels:read          # View public channel info
+      - groups:history         # View messages in private channels
+      - groups:read            # View private channel info
+      - im:history             # View direct messages
+      - im:read                # View DM info
+      - mpim:history           # View group DM messages
+      - users:read             # View user information
+
+      # Write permissions
+      - assistant:write        # Required for assistant features
+      - chat:write             # Send messages as the bot
+      - chat:write.public      # Send messages to public channels bot isn't in
+      - im:write               # Send direct messages
+      - reactions:write        # Add reactions to messages
+
+settings:
+  event_subscriptions:
+    # REQUEST URL SETUP:
+    #
+    # For LOCAL DEVELOPMENT:
+    #   1. Start your bot: python server.py
+    #   2. Start ngrok: ngrok http 3000 (or whatever port you're using)
+    #   3. Copy the ngrok URL (e.g., https://abc123.ngrok.io)
+    #   4. Use: https://abc123.ngrok.io/events/slack
+    #
+    # For PRODUCTION (LangGraph Platform):
+    #   1. Deploy your app to LangGraph Platform
+    #   2. Get your deployment URL (e.g., https://my-deployment.langgraph.app)
+    #   3. Use: https://my-deployment.langgraph.app/events/slack
+    #
+    request_url: https://your-deployment-url/events/slack  # REPLACE THIS!
+
+    bot_events:
+      - app_mention              # Bot is @mentioned in a channel
+      - assistant_thread_started # Assistant thread started (for Chat tab)
+      - message.channels         # Messages in public channels (where bot is member)
+      - message.im               # Direct messages to the bot
+      - message.mpim             # Group direct messages
+
+  org_deploy_enabled: false
+  socket_mode_enabled: false  # We use HTTP mode, not Socket mode
+  token_rotation_enabled: false
