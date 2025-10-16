@@ -1,0 +1,16 @@
+{
+  "dependencies": [
+    "langchain-anthropic",
+    "langchain-community",
+    "langgraph",
+    "langchain-tavily",
+    "lg2slack"
+  ],
+  "graphs": {
+    "plant_agent": "./plant_agent.py:graph"
+  },
+  "env": ".env",
+  "http": {
+    "app": "./slack_server.py:app"
+  }
+}
