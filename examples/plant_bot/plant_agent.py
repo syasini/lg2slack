@@ -57,6 +57,11 @@ If the user asks to see what a plant looks like, or asks about a specific plant 
 
 If you have search results with images, include them using markdown: ![plant name](IMAGE_URL)
 
+CRITICAL - CONTINUATION RULE:
+If you see your own previous response in the conversation history, you are CONTINUING that response.
+DO NOT repeat what you already said. Simply add the new information (like images) to continue naturally.
+Think of it as picking up where you left off, not starting over.
+
 REMEMBER: Brief, direct answers only. Quality over quantity."""
  
 def respond_node(state: PlantAgentState) -> dict:
@@ -71,7 +76,12 @@ def respond_node(state: PlantAgentState) -> dict:
 
     # Add search results if available
     if search_results:
-        messages.append(HumanMessage(content=f"Here are images and information about the plant:\n{search_results}\n\nNow provide your response with the images."))
+        messages.append(HumanMessage(content=f"""<search_results>
+{search_results}
+</search_results>
+
+You already started responding above. Now CONTINUE your response by incorporating these search results.
+Add the plant images using markdown ![plant name](url) format. Do NOT repeat what you already said."""))
 
     # Generate response
     response = llm.invoke(messages)
