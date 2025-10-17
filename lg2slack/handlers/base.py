@@ -5,6 +5,7 @@ to reduce code duplication and ensure consistency.
 """
 
 import logging
+import re
 import uuid
 from typing import List, Dict
 
@@ -29,6 +30,7 @@ class BaseHandler:
         output_transformers: TransformerChain,
         show_feedback_buttons: bool = True,
         show_thread_id: bool = True,
+        extract_images: bool = True,
         max_image_blocks: int = 5,
     ):
         """Initialize base handler.
@@ -39,6 +41,7 @@ class BaseHandler:
             output_transformers: Chain of output transformers
             show_feedback_buttons: Whether to show feedback buttons (default: True)
             show_thread_id: Whether to show thread_id in footer (default: True)
+            extract_images: Extract image markdown and render as blocks (default: True)
             max_image_blocks: Maximum number of image blocks to include (default: 5)
         """
         self.assistant_id = assistant_id
@@ -46,6 +49,7 @@ class BaseHandler:
         self.output_transformers = output_transformers
         self.show_feedback_buttons = show_feedback_buttons
         self.show_thread_id = show_thread_id
+        self.extract_images = extract_images
         self.max_image_blocks = max_image_blocks
 
     async def _apply_input_transforms(
@@ -108,7 +112,7 @@ class BaseHandler:
     ) -> List[Dict]:
         """Create Slack blocks for images and feedback.
 
-        Extracts markdown images from response, limits them to max_image_blocks,
+        Extracts markdown images from response (if enabled), limits them to max_image_blocks,
         and adds feedback blocks.
 
         Args:
@@ -118,16 +122,11 @@ class BaseHandler:
         Returns:
             List of Slack block dicts (image blocks + feedback blocks)
         """
-        # Extract markdown images from response
-        image_blocks = extract_markdown_images(response_text)
-
-        # Limit images to max_image_blocks
-        limited_image_blocks = image_blocks[:self.max_image_blocks]
-        if len(image_blocks) > self.max_image_blocks:
-            logger.warning(
-                f"Limited images from {len(image_blocks)} to {self.max_image_blocks} "
-                f"(max_image_blocks setting)"
-            )
+        # Extract markdown images from response if enabled
+        if self.extract_images:
+            image_blocks = extract_markdown_images(response_text, max_images=self.max_image_blocks)
+        else:
+            image_blocks = []
 
         # Create feedback blocks
         feedback_blocks = create_feedback_block(
@@ -137,9 +136,9 @@ class BaseHandler:
         )
 
         # Combine and return
-        blocks = limited_image_blocks + feedback_blocks
+        blocks = image_blocks + feedback_blocks
         logger.info(
-            f"Created {len(limited_image_blocks)} image blocks and "
+            f"Created {len(image_blocks)} image blocks and "
             f"{len(feedback_blocks)} feedback blocks"
         )
 

@@ -37,6 +37,7 @@ class MessageHandler(BaseHandler):
         output_transformers: TransformerChain,
         show_feedback_buttons: bool = True,
         show_thread_id: bool = True,
+        extract_images: bool = True,
         max_image_blocks: int = 5,
     ):
         """Initialize message handler.
@@ -48,6 +49,7 @@ class MessageHandler(BaseHandler):
             output_transformers: Chain of output transformers
             show_feedback_buttons: Whether to show feedback buttons (default: True)
             show_thread_id: Whether to show thread_id in footer (default: True)
+            extract_images: Extract image markdown and render as blocks (default: True)
             max_image_blocks: Maximum number of image blocks to include (default: 5)
         """
         # Initialize base class
@@ -57,6 +59,7 @@ class MessageHandler(BaseHandler):
             output_transformers=output_transformers,
             show_feedback_buttons=show_feedback_buttons,
             show_thread_id=show_thread_id,
+            extract_images=extract_images,
             max_image_blocks=max_image_blocks,
         )
         # Store handler-specific attributes

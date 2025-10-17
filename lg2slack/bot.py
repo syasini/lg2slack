@@ -49,6 +49,7 @@ class SlackBot:
         slack_signing_secret: Optional[str] = None,
         show_feedback_buttons: bool = True,
         show_thread_id: bool = True,
+        extract_images: bool = True,
         max_image_blocks: int = 5,
     ):
         """Initialize SlackBot.
@@ -62,6 +63,7 @@ class SlackBot:
             slack_signing_secret: Override Slack signing secret (or from env: SLACK_SIGNING_SECRET)
             show_feedback_buttons: Whether to show feedback buttons (default: True)
             show_thread_id: Whether to show thread_id in footer (default: True)
+            extract_images: Extract image markdown and render as blocks (default: True)
             max_image_blocks: Maximum number of image blocks to include (default: 5)
         """
         logger.info("Initializing SlackBot...")
@@ -79,6 +81,7 @@ class SlackBot:
         self.reply_in_thread = reply_in_thread
         self.show_feedback_buttons = show_feedback_buttons
         self.show_thread_id = show_thread_id
+        self.extract_images = extract_images
         self.max_image_blocks = max_image_blocks
 
         # Initialize transformer chains
@@ -114,6 +117,7 @@ class SlackBot:
                 reply_in_thread=self.reply_in_thread,
                 show_feedback_buttons=self.show_feedback_buttons,
                 show_thread_id=self.show_thread_id,
+                extract_images=self.extract_images,
                 max_image_blocks=self.max_image_blocks,
             )
             logger.info("Using StreamingHandler (low-latency streaming)")
@@ -125,6 +129,7 @@ class SlackBot:
                 output_transformers=self._output_transformers,
                 show_feedback_buttons=self.show_feedback_buttons,
                 show_thread_id=self.show_thread_id,
+                extract_images=self.extract_images,
                 max_image_blocks=self.max_image_blocks,
             )
             logger.info("Using MessageHandler (non-streaming)")

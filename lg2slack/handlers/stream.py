@@ -41,6 +41,7 @@ class StreamingHandler(BaseHandler):
         reply_in_thread: bool = True,
         show_feedback_buttons: bool = True,
         show_thread_id: bool = True,
+        extract_images: bool = True,
         max_image_blocks: int = 5,
     ):
         """Initialize streaming handler.
@@ -54,6 +55,7 @@ class StreamingHandler(BaseHandler):
             reply_in_thread: Reply in thread vs main channel (default: True)
             show_feedback_buttons: Whether to show feedback buttons (default: True)
             show_thread_id: Whether to show thread_id in footer (default: True)
+            extract_images: Extract image markdown and render as blocks (default: True)
             max_image_blocks: Maximum number of image blocks to include (default: 5)
         """
         # Initialize base class
@@ -63,6 +65,7 @@ class StreamingHandler(BaseHandler):
             output_transformers=output_transformers,
             show_feedback_buttons=show_feedback_buttons,
             show_thread_id=show_thread_id,
+            extract_images=extract_images,
             max_image_blocks=max_image_blocks,
         )
         # Store handler-specific attributes
@@ -182,42 +185,42 @@ class StreamingHandler(BaseHandler):
                 if_not_exists="create",
             ):
                 chunk_count += 1
-                logger.info(f"Chunk #{chunk_count}: event={chunk.event}")
+                logger.debug(f"Chunk #{chunk_count}: event={chunk.event}")
 
                 # Capture run_id from metadata chunks (appears before message chunks)
                 if run_id is None:
                     # Check if this is a metadata event with run_id
                     if hasattr(chunk, "data") and isinstance(chunk.data, dict) and "run_id" in chunk.data:
                         run_id = chunk.data["run_id"]
-                        logger.info(f"Captured run_id from chunk.data: {run_id}")
+                        logger.info(f"Captured run_id: {run_id}")
 
                 # Only process message chunks (skip metadata/other events)
                 if chunk.event != "messages":
-                    logger.info(f"Chunk #{chunk_count}: skipping non-message event")
+                    logger.debug(f"Chunk #{chunk_count}: skipping non-message event")
                     continue
 
                 # Extract message data from chunk - it's a tuple!
                 message_data, _msg_metadata = chunk.data
                 msg_type = message_data.get("type", "")
-                logger.info(f"Chunk #{chunk_count}: message type={msg_type}")
+                logger.debug(f"Chunk #{chunk_count}: message type={msg_type}")
 
                 # Skip non-AI messages (check for both "ai" and "AIMessageChunk")
                 if not (msg_type == "ai" or msg_type == "AIMessageChunk"):
-                    logger.info(f"Chunk #{chunk_count}: skipping non-AI message")
+                    logger.debug(f"Chunk #{chunk_count}: skipping non-AI message")
                     continue
 
                 # Get content from the chunk
                 content = message_data.get("content", "")
-                logger.info(f"Chunk #{chunk_count}: content preview={str(content)[:100]}")
+                logger.debug(f"Chunk #{chunk_count}: content preview={str(content)[:100]}")
 
                 if not content:
-                    logger.info(f"Chunk #{chunk_count}: no content")
+                    logger.debug(f"Chunk #{chunk_count}: no content")
                     continue
 
                 # Handle both string and list content
                 if isinstance(content, list):
                     content = "".join([block.get("text", "") for block in content if block.get("type") == "text"])
-                    logger.info(f"Chunk #{chunk_count}: extracted from list, length={len(content)}")
+                    logger.debug(f"Chunk #{chunk_count}: extracted from list, length={len(content)}")
 
                 # Skip empty content
                 if not content.strip():
@@ -227,7 +230,7 @@ class StreamingHandler(BaseHandler):
                 # Track complete response for image extraction
                 # IMPORTANT: Accumulate chunks, don't replace!
                 complete_response += content
-                logger.info(f"Chunk #{chunk_count}: sending {len(content)} chars to Slack (total accumulated: {len(complete_response)})")
+                logger.debug(f"Chunk #{chunk_count}: sending {len(content)} chars to Slack (total accumulated: {len(complete_response)})")
 
                 # CRITICAL: Immediately send to Slack
                 # This is where low latency happens - no waiting!
@@ -237,7 +240,7 @@ class StreamingHandler(BaseHandler):
                     content=content,
                 )
 
-            logger.info(f"Stream completed: processed {chunk_count} total chunks")
+            logger.info(f"Stream completed: {chunk_count} chunks, {len(complete_response)} chars")
 
         except Exception as e:
             logger.error(f"Error during streaming: {e}", exc_info=True)
@@ -255,12 +258,12 @@ class StreamingHandler(BaseHandler):
         # Note: We transform the complete response, not individual chunks
         # This ensures transformers see the full context
         if complete_response:
-            logger.info(f"Complete response before output transforms (length={len(complete_response)}): {complete_response[:200]}...")
+            logger.debug(f"Applying output transforms to {len(complete_response)} chars")
             complete_response = await self.output_transformers.apply(
                 complete_response,
                 context
             )
-            logger.info(f"Complete response after output transforms (length={len(complete_response)}): {complete_response[:200]}...")
+            logger.debug(f"After transforms: {len(complete_response)} chars")
 
         if run_id:
             logger.info(f"Returning complete response with run_id: {run_id}")
@@ -340,6 +343,9 @@ class StreamingHandler(BaseHandler):
     ) -> None:
         """Stop Slack stream and add optional blocks (images, buttons).
 
+        The text has already been streamed, so we only add image blocks (if extract_images=True)
+        and feedback/thread_id blocks.
+
         Note: Slack's chat.stopStream doesn't support blocks in threads, so we:
         1. Stop the stream without blocks
         2. Update the message with blocks using chat.update
@@ -351,11 +357,7 @@ class StreamingHandler(BaseHandler):
             thread_id: Optional LangGraph thread ID to include in feedback footer
         """
         try:
-            # Log the complete response for debugging
-            logger.info(f"Stopping stream with complete_response (length={len(complete_response)})")
-            logger.debug(f"Complete response content: {complete_response}")
-
-            # Create blocks (images + feedback)
+            # Create blocks (images + feedback, NO text block since we already streamed it)
             blocks = self._create_blocks(complete_response, thread_id)
 
             # Stop the stream without blocks
@@ -364,7 +366,7 @@ class StreamingHandler(BaseHandler):
                 ts=stream_ts,
             )
 
-            logger.info("Stream stopped")
+            logger.debug("Stream stopped")
 
             # If we have blocks to add, update the message
             if blocks:
@@ -374,7 +376,7 @@ class StreamingHandler(BaseHandler):
                 # Get the current message text for the fallback
                 slack_text = clean_markdown(complete_response)
 
-                # Create a text block with the response
+                # Create a text section block to preserve the streamed content
                 text_block = {
                     "type": "section",
                     "text": {
@@ -383,11 +385,11 @@ class StreamingHandler(BaseHandler):
                     }
                 }
 
-                # Prepend text block to other blocks
+                # Prepend text block to preserve streamed content, then add images + feedback
                 all_blocks = [text_block] + blocks
 
                 try:
-                    # Update the message with blocks
+                    # Update the message with text + blocks (images + feedback)
                     await self.slack_client.client.chat_update(
                         channel=channel_id,
                         ts=stream_ts,
@@ -395,13 +397,13 @@ class StreamingHandler(BaseHandler):
                         blocks=all_blocks,
                     )
 
-                    logger.info(f"Updated message with {len(all_blocks)} blocks")
+                    logger.info(f"Added {len(all_blocks)} blocks to message")
 
                 except Exception as block_error:
                     # If updating with blocks fails (e.g., image download issues),
-                    # fall back to just the text and feedback blocks without images
-                    logger.warning(f"Failed to update with all blocks: {block_error}")
-                    logger.info("Retrying with feedback blocks only (no images)")
+                    # fall back to just feedback blocks without images
+                    logger.warning(f"Failed to add blocks: {block_error}")
+                    logger.debug("Retrying with feedback blocks only (no images)")
 
                     # Get only feedback blocks (no image blocks)
                     from ..utils import create_feedback_block
@@ -411,15 +413,18 @@ class StreamingHandler(BaseHandler):
                         show_thread_id=self.show_thread_id,
                     )
 
-                    # Try again with just text and feedback
+                    # Add text block back
+                    fallback_blocks = [text_block] + feedback_only_blocks
+
+                    # Try again with just text + feedback
                     try:
                         await self.slack_client.client.chat_update(
                             channel=channel_id,
                             ts=stream_ts,
                             text=slack_text,
-                            blocks=[text_block] + feedback_only_blocks,
+                            blocks=fallback_blocks,
                         )
-                        logger.info("Successfully updated with text and feedback only")
+                        logger.info("Added feedback blocks only")
                     except Exception as fallback_error:
                         logger.error(f"Failed even with feedback-only blocks: {fallback_error}")
 

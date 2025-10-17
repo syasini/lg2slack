@@ -92,7 +92,7 @@ def clean_markdown(text: str) -> str:
     return text
 
 
-def extract_markdown_images(text: str) -> List[Dict]:
+def extract_markdown_images(text: str, max_images: int = None) -> List[Dict]:
     """Extract markdown images and return Slack image blocks.
 
     Finds all markdown images in format: ![alt](url)
@@ -100,9 +100,10 @@ def extract_markdown_images(text: str) -> List[Dict]:
 
     Args:
         text: Text containing markdown images
+        max_images: Maximum number of image blocks to return (None for unlimited)
 
     Returns:
-        List of Slack image block dicts
+        List of Slack image block dicts (limited to max_images if specified)
 
     Example:
         >>> extract_markdown_images("Here's a chart: ![Sales Chart](https://example.com/chart.png)")
@@ -130,6 +131,13 @@ def extract_markdown_images(text: str) -> List[Dict]:
         }
         logger.info(f"Creating image block: alt_text='{alt_text}', url='{url}'")
         image_blocks.append(block)
+
+    # Limit to max_images if specified
+    if max_images is not None and len(image_blocks) > max_images:
+        logger.warning(
+            f"Limited images from {len(image_blocks)} to {max_images} (max_images setting)"
+        )
+        return image_blocks[:max_images]
 
     return image_blocks
 
