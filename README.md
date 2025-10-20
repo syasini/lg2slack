@@ -2,14 +2,6 @@
 
 Simple, minimal package to connect LangGraph applications to Slack with just a few lines of code.
 
-## Features
-
-- ⚡ **Streaming by default** - Low latency responses that stream directly from LangGraph to Slack
-- 🎯 **Minimal setup** - Just 4 lines of code to get started
-- 🔌 **Transformer hooks** - Easily customize input/output processing
-- 🚀 **LangGraph Platform ready** - Deploy directly to LangGraph Platform
-- 📝 **Well documented** - Extensive inline comments and examples
-
 ## Installation
 
 ```bash
