@@ -380,8 +380,12 @@ class StreamingHandler(BaseHandler):
                 # Small delay to ensure Slack has processed the stream stop
                 await asyncio.sleep(0.5)
 
+                # Remove image markdown from text (since we're showing them as image blocks)
+                import re
+                text_without_images = re.sub(r"!\[([^\]]*)\]\(.+?\)", "", complete_response)
+
                 # Get the current message text for the fallback
-                slack_text = clean_markdown(complete_response)
+                slack_text = clean_markdown(text_without_images)
 
                 # Create a text section block to preserve the streamed content
                 text_block = {

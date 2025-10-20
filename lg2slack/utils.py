@@ -69,11 +69,13 @@ def clean_markdown(text: str) -> str:
         'Check <https://example.com|this link>'
     """
     # Convert markdown links: [text](url) -> <url|text>
-    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"<\2|\1>", text)
+    # Use non-greedy match and handle URLs with parentheses
+    text = re.sub(r"\[([^\]]+)\]\((.+?)\)", r"<\2|\1>", text)
 
     # Convert markdown images: ![alt](url) -> !<url|alt>
     # Note: Slack doesn't render images inline in text, but this preserves the format
-    text = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", r"!<\2|\1>", text)
+    # Use non-greedy match to handle URLs with parentheses
+    text = re.sub(r"!\[([^\]]*)\]\((.+?)\)", r"!<\2|\1>", text)
 
     # Convert bold: **text** -> *text* (Slack uses single asterisk for bold)
     text = re.sub(r"\*\*([^*]+)\*\*", r"*\1*", text)
@@ -114,22 +116,34 @@ def extract_markdown_images(text: str, max_images: int = None) -> List[Dict]:
 
     # Pattern matches: ![alt text](url)
     # Group 1: alt text (can be empty)
-    # Group 2: url
-    pattern = r"!\[([^\]]*)\]\(([^)]+)\)"
-    matches = re.findall(pattern, text)
+    # Group 2: url - use greedy match to get everything until last )
+    # This handles URLs that may contain parentheses
+    pattern = r"!\[([^\]]*)\]\((.+)\)"
+
+    # Find all image markdown patterns
+    # We need to be careful with URLs containing parentheses
+    matches = []
+    remaining_text = text
+    while True:
+        match = re.search(pattern, remaining_text)
+        if not match:
+            break
+        matches.append((match.group(1), match.group(2)))
+        # Remove this match and continue searching
+        remaining_text = remaining_text[match.end():]
 
     logger.info(f"Searching for markdown images in text (length={len(text)})")
-    logger.debug(f"Text to search: {text}")
+    logger.info(f"Full text to search: {text}")
     logger.info(f"Found {len(matches)} markdown image patterns")
 
     image_blocks = []
     for alt_text, url in matches:
         block = {
             "type": "image",
-            "image_url": url,
+            "image_url": url.strip(),
             "alt_text": alt_text or "Image",  # Default alt text if empty
         }
-        logger.info(f"Creating image block: alt_text='{alt_text}', url='{url}'")
+        logger.info(f"Creating image block: alt_text='{alt_text}', url='{url.strip()}'")
         image_blocks.append(block)
 
     # Limit to max_images if specified
