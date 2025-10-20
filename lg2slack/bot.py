@@ -6,6 +6,7 @@ sets up Slack handlers, and coordinates between Slack and LangGraph.
 
 import logging
 import asyncio
+import json
 from typing import Optional, Callable, Dict
 from fastapi import FastAPI, Request
 from slack_bolt.async_app import AsyncApp
@@ -17,7 +18,7 @@ from pydantic import SecretStr
 from .config import BotConfig, MessageContext
 from .handlers import MessageHandler, StreamingHandler
 from .transformers import TransformerChain
-from .utils import is_bot_mention, is_dm
+from .utils import is_bot_mention, is_dm, create_feedback_modal, extract_feedback_text
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +48,9 @@ class SlackBot:
         reply_in_thread: bool = True,
         slack_bot_token: Optional[str] = None,
         slack_signing_secret: Optional[str] = None,
-        show_feedback_buttons: bool = True,
-        show_thread_id: bool = True,
+        show_feedback_buttons: bool = False,
+        enable_feedback_comments: bool = False,
+        show_thread_id: bool = False,
         extract_images: bool = True,
         max_image_blocks: int = 5,
         include_metadata: bool = True,
@@ -63,10 +65,14 @@ class SlackBot:
             slack_bot_token: Override Slack bot token (or from env: SLACK_BOT_TOKEN)
             slack_signing_secret: Override Slack signing secret (or from env: SLACK_SIGNING_SECRET)
             show_feedback_buttons: Whether to show feedback buttons (default: True)
+            enable_feedback_comments: Enable text input modal for negative feedback (default: False)
             show_thread_id: Whether to show thread_id in footer (default: True)
             extract_images: Extract image markdown and render as blocks (default: True)
             max_image_blocks: Maximum number of image blocks to include (default: 5)
-            include_metadata: Include Slack context as metadata in LangGraph (default: False)
+            include_metadata: Include Slack context as metadata in LangGraph (default: True).
+                When True, passes the following fields by default: slack_user_id,
+                slack_channel_id, slack_message_ts, slack_thread_ts, slack_channel_type,
+                slack_is_dm, slack_is_thread. Use @bot.transform_metadata to customize.
         """
         logger.info("Initializing SlackBot...")
 
@@ -82,6 +88,7 @@ class SlackBot:
         self.streaming_enabled = streaming
         self.reply_in_thread = reply_in_thread
         self.show_feedback_buttons = show_feedback_buttons
+        self.enable_feedback_comments = enable_feedback_comments
         self.show_thread_id = show_thread_id
         self.extract_images = extract_images
         self.max_image_blocks = max_image_blocks
@@ -445,8 +452,13 @@ class SlackBot:
 
         # Handler for feedback button clicks
         @self.slack_app.action("feedback")
-        async def handle_feedback(ack, body, logger):
-            """Handle feedback button clicks and submit to LangSmith."""
+        async def handle_feedback(ack, body, client, logger):
+            """Handle feedback button clicks.
+
+            For positive feedback: submit directly to LangSmith.
+            For negative feedback (with comments enabled): open modal for text input.
+            For negative feedback (without comments): submit directly to LangSmith.
+            """
             await ack()
 
             try:
@@ -463,40 +475,118 @@ class SlackBot:
                     f"Feedback clicked: User {user_id} gave '{feedback_value}' for message {channel_id}:{message_ts}"
                 )
 
-                # Look up the run information
-                message_key = f"{channel_id}:{message_ts}"
-                run_info = self.message_run_mapping.get(message_key)
-
-                if not run_info:
-                    logger.error(f"No run mapping found for message key: {message_key}")
-                    logger.error(f"Available mappings: {list(self.message_run_mapping.keys())}")
+                # Look up run_id from message mapping
+                run_id = self._lookup_run_id(channel_id, message_ts)
+                if not run_id:
                     return
 
-                run_id = run_info["run_id"]
+                # Handle negative feedback with comments enabled
+                if feedback_value == "negative" and self.enable_feedback_comments:
+                    # Open modal for text input
+                    message_context = json.dumps({
+                        "channel_id": channel_id,
+                        "message_ts": message_ts,
+                        "run_id": run_id,
+                    })
+                    modal_view = create_feedback_modal(message_context)
 
-                # Convert feedback to score (1.0 for positive, 0.0 for negative)
+                    await client.views_open(
+                        trigger_id=body["trigger_id"],
+                        view=modal_view,
+                    )
+                    logger.info("Opened feedback modal for negative feedback")
+                    return
+
+                # Handle positive feedback or negative feedback without comments
                 score = 1.0 if feedback_value == "positive" else 0.0
+                comment = f"Slack user feedback: {feedback_value}"
 
-                # Submit feedback to LangSmith (run in thread pool to avoid blocking async loop)
-                logger.info(f"Submitting feedback to LangSmith: run_id={run_id}, score={score}")
-
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(
-                    None,
-                    lambda: self.langsmith_client.create_feedback(
-                        run_id=run_id,
-                        key="user_feedback",
-                        score=score,
-                        comment=f"Slack user feedback: {feedback_value}",
-                    ),
-                )
-
-                logger.info(f"Feedback submitted successfully to LangSmith for run {run_id}")
+                await self._submit_feedback(run_id, score, comment)
 
             except Exception as e:
                 logger.exception(f"Error handling feedback: {e}")
 
+        # Handler for feedback modal submission
+        @self.slack_app.view("feedback_modal")
+        async def handle_feedback_modal_submission(ack, body, view, logger):
+            """Handle feedback modal submission with text."""
+            await ack()
+
+            try:
+                # Extract message context from private_metadata
+                private_metadata = view.get("private_metadata", "{}")
+                context = json.loads(private_metadata)
+
+                run_id = context.get("run_id")
+                if not run_id:
+                    logger.error("No run_id in modal private_metadata")
+                    return
+
+                # Extract feedback text from modal
+                view_state = view.get("state", {}).get("values", {})
+                feedback_text = extract_feedback_text(view_state)
+
+                logger.info(f"Modal submitted with feedback text (length={len(feedback_text)})")
+
+                # Submit negative feedback with optional comment
+                comment = feedback_text if feedback_text else None
+
+                await self._submit_feedback(run_id, score=0.0, comment=comment)
+
+            except Exception as e:
+                logger.exception(f"Error handling feedback modal submission: {e}")
+
         logger.info("Slack event handlers registered")
+
+    def _lookup_run_id(self, channel_id: str, message_ts: str) -> Optional[str]:
+        """Look up run_id from message mapping.
+
+        Args:
+            channel_id: Slack channel ID
+            message_ts: Slack message timestamp
+
+        Returns:
+            run_id if found, None otherwise
+        """
+        message_key = f"{channel_id}:{message_ts}"
+        run_info = self.message_run_mapping.get(message_key)
+
+        if not run_info:
+            logger.error(f"No run mapping found for message key: {message_key}")
+            logger.error(f"Available mappings: {list(self.message_run_mapping.keys())}")
+            return None
+
+        return run_info["run_id"]
+
+    async def _submit_feedback(
+        self,
+        run_id: str,
+        score: float,
+        comment: str = None,
+    ) -> None:
+        """Submit feedback to LangSmith.
+
+        Runs in executor to avoid blocking async loop.
+
+        Args:
+            run_id: LangGraph run ID
+            score: Feedback score (1.0 for positive, 0.0 for negative)
+            comment: Optional comment text
+        """
+        logger.info(f"Submitting feedback to LangSmith: run_id={run_id}, score={score}")
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: self.langsmith_client.create_feedback(
+                run_id=run_id,
+                key="user_feedback",
+                score=score,
+                comment=comment,
+            ),
+        )
+
+        logger.info(f"Feedback submitted successfully for run {run_id}")
 
     async def _should_process_message(self, event: dict) -> bool:
         """Determine if we should process this message.

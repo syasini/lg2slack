@@ -199,3 +199,67 @@ def create_feedback_block(
         })
 
     return blocks
+
+
+def create_feedback_modal(message_context: str) -> Dict:
+    """Create modal view for collecting negative feedback text.
+
+    Args:
+        message_context: JSON string with channel_id, message_ts, and run_id
+                        to pass through modal submission
+
+    Returns:
+        Modal view dict ready for views.open API
+
+    Example:
+        view = create_feedback_modal(message_context='{"channel_id": "C123", ...}')
+        client.views_open(trigger_id=trigger_id, view=view)
+    """
+    return {
+        "type": "modal",
+        "callback_id": "feedback_modal",
+        "private_metadata": message_context,  # Pass context through to submission
+        "title": {"type": "plain_text", "text": "Feedback"},
+        "submit": {"type": "plain_text", "text": "Submit"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "feedback_text",
+                "optional": True,  # User can submit without text
+                "label": {"type": "plain_text", "text": "What went wrong?"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": "feedback_input",
+                    "multiline": True,
+                    "placeholder": {
+                        "type": "plain_text",
+                        "text": "Optional: Tell us how we can improve..."
+                    }
+                }
+            }
+        ]
+    }
+
+
+def extract_feedback_text(view_state: Dict) -> str:
+    """Extract feedback text from modal submission view state.
+
+    Args:
+        view_state: The view["state"]["values"] dict from view_submission payload
+
+    Returns:
+        Feedback text string (empty string if not provided)
+
+    Example:
+        text = extract_feedback_text(body["view"]["state"]["values"])
+    """
+    try:
+        # Navigate the nested structure: values -> block_id -> action_id -> value
+        feedback_block = view_state.get("feedback_text", {})
+        feedback_input = feedback_block.get("feedback_input", {})
+        text = feedback_input.get("value", "")
+        return text or ""
+    except Exception:
+        # Return empty string if extraction fails
+        return ""
