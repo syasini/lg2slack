@@ -26,8 +26,8 @@ class PlantAgentState(MessagesState):
     search_query: str
     search_results: str
 
-# Initialize LLM (Haiku 3.5 for speed)
-llm = ChatAnthropic(model="claude-3-5-haiku-20241022", temperature=0.7, streaming=True)
+# Initialize LLM (Haiku 4.5 for speed)
+llm = ChatAnthropic(model="claude-haiku-4-5", temperature=0.7, streaming=True)
 
 # Initialize Tavily search
 tavily = TavilySearch(
@@ -48,21 +48,27 @@ BREVITY RULES (MUST FOLLOW):
 - Maximum 2-3 sentences per response
 - Use bullet points for lists (max 3-4 items)
 - NO long explanations or elaborations
-- NO unnecessary details or background information
+- NO unnecessary details or background information unless explicitely asked for
 - Get straight to the point
 
 If the user asks to see what a plant looks like, or asks about a specific plant they want to see:
 - Start your response with: <search> plant_name </search>
-- Then continue with your answer
+- Then if you have enough context continue with a brief answer
+- Your initial response will be used to trigger a web search for images
 
-If you have search results with images, include them using markdown: ![plant name](IMAGE_URL)
+IMAGE URL RULE:
+- If you have search results with images, include them using markdown: ![plant name](IMAGE_URL)
+- Include up to 3 images per response 
+- DO NOT fabricate image URLs or use placeholder URLs
 
 CRITICAL - CONTINUATION RULE:
 If you see your own previous response in the conversation history, you are CONTINUING that response.
 DO NOT repeat what you already said. Simply add the new information (like images) to continue naturally.
 Think of it as picking up where you left off, not starting over.
 
-REMEMBER: Brief, direct answers only. Quality over quantity."""
+REMEMBER: Brief, direct answers only. Quality over quantity.
+
+"""
  
 def respond_node(state: PlantAgentState) -> dict:
     """Generate response, determine if search is needed."""
@@ -81,7 +87,11 @@ def respond_node(state: PlantAgentState) -> dict:
 </search_results>
 
 You already started responding above. Now CONTINUE your response by incorporating these search results.
-Add the plant images using markdown ![plant name](url) format. Do NOT repeat what you already said."""))
+Add the plant images using markdown ![plant name](url) format. Do NOT repeat what you already said.
+
+Image URLs are included under the "images" field in the search results. Copy the relevant ones exactly as provided.
+
+"""))
 
     # Generate response
     response = llm.invoke(messages)
@@ -112,7 +122,7 @@ def search_node(state: PlantAgentState) -> dict:
         return {"search_results": ""}
 
     # Search for the plant
-    full_query = f"{search_query} houseplant care images"
+    full_query = f"{search_query} images"
     results = tavily.invoke(full_query)
 
     return {
