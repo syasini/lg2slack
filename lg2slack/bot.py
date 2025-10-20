@@ -54,6 +54,7 @@ class SlackBot:
         extract_images: bool = True,
         max_image_blocks: int = 5,
         include_metadata: bool = True,
+        processing_reaction: Optional[str] = None,
     ):
         """Initialize SlackBot.
 
@@ -73,6 +74,9 @@ class SlackBot:
                 When True, passes the following fields by default: slack_user_id,
                 slack_channel_id, slack_message_ts, slack_thread_ts, slack_channel_type,
                 slack_is_dm, slack_is_thread. Use @bot.transform_metadata to customize.
+            processing_reaction: Emoji name (not emoji character) to add as reaction while processing (default: None).
+                Must be a Slack emoji name like "eyes", "hourglass", "robot_face", not the actual emoji character.
+                Reaction is removed when done.
         """
         logger.info("Initializing SlackBot...")
 
@@ -93,6 +97,7 @@ class SlackBot:
         self.extract_images = extract_images
         self.max_image_blocks = max_image_blocks
         self.include_metadata = include_metadata
+        self.processing_reaction = processing_reaction
 
         # Initialize transformer chains
         self._input_transformers = TransformerChain()
@@ -360,88 +365,98 @@ class SlackBot:
             if self._bot_user_id:
                 message_text = message_text.replace(f"<@{self._bot_user_id}>", "").strip()
 
-            # Process based on handler type
-            if self.streaming_enabled:
-                # Streaming: handler sends response directly to Slack
-                stream_ts, thread_id, run_id = await self.handler.process_message(message_text, context)
+            # Add processing reaction if configured
+            if self.processing_reaction:
+                await self._add_reaction(context.channel_id, context.message_ts, self.processing_reaction)
 
-                # Store mapping for feedback
-                if run_id and stream_ts:
-                    message_key = f"{context.channel_id}:{stream_ts}"
-                    self.message_run_mapping[message_key] = {
-                        "thread_id": thread_id,
-                        "run_id": run_id,
-                    }
-                    logger.info(f"Stored feedback mapping: {message_key} -> thread_id={thread_id}, run_id={run_id}")
-                else:
-                    logger.warning(f"No run_id captured for streaming message")
+            try:
+                # Process based on handler type
+                if self.streaming_enabled:
+                    # Streaming: handler sends response directly to Slack
+                    stream_ts, thread_id, run_id = await self.handler.process_message(message_text, context)
 
-            else:
-                # Non-streaming: handler returns response, we send it
-                logger.info("Non-streaming mode: calling handler.process_message")
-                response_text, blocks, thread_id, run_id = await self.handler.process_message(message_text, context)
-                logger.info(f"Handler returned: response_text length={len(response_text)}, blocks count={len(blocks)}, thread_id={thread_id}, run_id={run_id}")
-
-                # Determine thread_ts based on reply_in_thread setting
-                if self.reply_in_thread:
-                    # Always reply in thread (use message ts if not already in thread)
-                    thread_ts = event.get("thread_ts") or event.get("ts")
-                else:
-                    # Only reply in thread if message was already in a thread
-                    thread_ts = event.get("thread_ts")
-
-                logger.info(f"Sending message to Slack: thread_ts={thread_ts}, blocks={len(blocks)} blocks")
-
-                # If we have blocks, prepend a text section block with the response
-                if blocks:
-                    # Create a text section block for the response
-                    text_block = {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": response_text
+                    # Store mapping for feedback
+                    if run_id and stream_ts:
+                        message_key = f"{context.channel_id}:{stream_ts}"
+                        self.message_run_mapping[message_key] = {
+                            "thread_id": thread_id,
+                            "run_id": run_id,
                         }
-                    }
-                    # Prepend text block to the beginning
-                    blocks = [text_block] + blocks
-                    logger.info(f"Added text block, total blocks: {len(blocks)}")
-
-                # Send message with blocks (or just text if no blocks)
-                # Try sending with blocks first, fallback to text-only if image download fails
-                try:
-                    result = await say(
-                        text=response_text,  # Fallback text for notifications
-                        thread_ts=thread_ts,
-                        blocks=blocks if blocks else None,
-                    )
-                    logger.info(f"Message sent successfully, result ts={result.get('ts') if result else 'None'}")
-                except Exception as e:
-                    # If error mentions invalid_blocks or downloading image, retry without image blocks
-                    error_str = str(e)
-                    if "invalid_blocks" in error_str or "downloading image" in error_str:
-                        logger.warning(f"Image blocks failed ({error_str}), retrying without images")
-                        # Keep text block and feedback block, remove image blocks
-                        blocks_without_images = [b for b in blocks if b.get("type") != "image"]
-                        result = await say(
-                            text=response_text,
-                            thread_ts=thread_ts,
-                            blocks=blocks_without_images if blocks_without_images else None,
-                        )
-                        logger.info(f"Message sent without images, result ts={result.get('ts') if result else 'None'}")
+                        logger.info(f"Stored feedback mapping: {message_key} -> thread_id={thread_id}, run_id={run_id}")
                     else:
-                        # Some other error, re-raise it
-                        raise
+                        logger.warning(f"No run_id captured for streaming message")
 
-                # Store mapping for feedback
-                if run_id and result and result.get("ts"):
-                    message_key = f"{context.channel_id}:{result['ts']}"
-                    self.message_run_mapping[message_key] = {
-                        "thread_id": thread_id,
-                        "run_id": run_id,
-                    }
-                    logger.info(f"Stored feedback mapping: {message_key} -> thread_id={thread_id}, run_id={run_id}")
                 else:
-                    logger.warning(f"No run_id captured for non-streaming message")
+                    # Non-streaming: handler returns response, we send it
+                    logger.info("Non-streaming mode: calling handler.process_message")
+                    response_text, blocks, thread_id, run_id = await self.handler.process_message(message_text, context)
+                    logger.info(f"Handler returned: response_text length={len(response_text)}, blocks count={len(blocks)}, thread_id={thread_id}, run_id={run_id}")
+
+                    # Determine thread_ts based on reply_in_thread setting
+                    if self.reply_in_thread:
+                        # Always reply in thread (use message ts if not already in thread)
+                        thread_ts = event.get("thread_ts") or event.get("ts")
+                    else:
+                        # Only reply in thread if message was already in a thread
+                        thread_ts = event.get("thread_ts")
+
+                    logger.info(f"Sending message to Slack: thread_ts={thread_ts}, blocks={len(blocks)} blocks")
+
+                    # If we have blocks, prepend a text section block with the response
+                    if blocks:
+                        # Create a text section block for the response
+                        text_block = {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": response_text
+                            }
+                        }
+                        # Prepend text block to the beginning
+                        blocks = [text_block] + blocks
+                        logger.info(f"Added text block, total blocks: {len(blocks)}")
+
+                    # Send message with blocks (or just text if no blocks)
+                    # Try sending with blocks first, fallback to text-only if image download fails
+                    try:
+                        result = await say(
+                            text=response_text,  # Fallback text for notifications
+                            thread_ts=thread_ts,
+                            blocks=blocks if blocks else None,
+                        )
+                        logger.info(f"Message sent successfully, result ts={result.get('ts') if result else 'None'}")
+                    except Exception as e:
+                        # If error mentions invalid_blocks or downloading image, retry without image blocks
+                        error_str = str(e)
+                        if "invalid_blocks" in error_str or "downloading image" in error_str:
+                            logger.warning(f"Image blocks failed ({error_str}), retrying without images")
+                            # Keep text block and feedback block, remove image blocks
+                            blocks_without_images = [b for b in blocks if b.get("type") != "image"]
+                            result = await say(
+                                text=response_text,
+                                thread_ts=thread_ts,
+                                blocks=blocks_without_images if blocks_without_images else None,
+                            )
+                            logger.info(f"Message sent without images, result ts={result.get('ts') if result else 'None'}")
+                        else:
+                            # Some other error, re-raise it
+                            raise
+
+                    # Store mapping for feedback
+                    if run_id and result and result.get("ts"):
+                        message_key = f"{context.channel_id}:{result['ts']}"
+                        self.message_run_mapping[message_key] = {
+                            "thread_id": thread_id,
+                            "run_id": run_id,
+                        }
+                        logger.info(f"Stored feedback mapping: {message_key} -> thread_id={thread_id}, run_id={run_id}")
+                    else:
+                        logger.warning(f"No run_id captured for non-streaming message")
+
+            finally:
+                # Remove processing reaction if configured
+                if self.processing_reaction:
+                    await self._remove_reaction(context.channel_id, context.message_ts, self.processing_reaction)
 
         # Handler for app_mention events (when bot is @mentioned)
         @self.slack_app.event("app_mention")
@@ -587,6 +602,52 @@ class SlackBot:
         )
 
         logger.info(f"Feedback submitted successfully for run {run_id}")
+
+    async def _add_reaction(
+        self,
+        channel_id: str,
+        message_ts: str,
+        emoji: str,
+    ) -> None:
+        """Add emoji reaction to a Slack message.
+
+        Args:
+            channel_id: Slack channel ID
+            message_ts: Slack message timestamp
+            emoji: Emoji name (without colons, e.g., "eyes", "hourglass")
+        """
+        try:
+            await self.slack_app.client.reactions_add(
+                channel=channel_id,
+                timestamp=message_ts,
+                name=emoji,
+            )
+            logger.debug(f"Added reaction :{emoji}: to message {channel_id}:{message_ts}")
+        except Exception as e:
+            logger.warning(f"Failed to add reaction :{emoji}:: {e}")
+
+    async def _remove_reaction(
+        self,
+        channel_id: str,
+        message_ts: str,
+        emoji: str,
+    ) -> None:
+        """Remove emoji reaction from a Slack message.
+
+        Args:
+            channel_id: Slack channel ID
+            message_ts: Slack message timestamp
+            emoji: Emoji name (without colons, e.g., "eyes", "hourglass")
+        """
+        try:
+            await self.slack_app.client.reactions_remove(
+                channel=channel_id,
+                timestamp=message_ts,
+                name=emoji,
+            )
+            logger.debug(f"Removed reaction :{emoji}: from message {channel_id}:{message_ts}")
+        except Exception as e:
+            logger.warning(f"Failed to remove reaction :{emoji}:: {e}")
 
     async def _should_process_message(self, event: dict) -> bool:
         """Determine if we should process this message.
