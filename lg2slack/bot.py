@@ -55,6 +55,7 @@ class SlackBot:
         max_image_blocks: int = 5,
         include_metadata: bool = True,
         processing_reaction: Optional[str] = None,
+        message_types: Optional[list[str]] = None,
     ):
         """Initialize SlackBot.
 
@@ -77,6 +78,15 @@ class SlackBot:
             processing_reaction: Emoji name (not emoji character) to add as reaction while processing (default: None).
                 Must be a Slack emoji name like "eyes", "hourglass", "robot_face", not the actual emoji character.
                 Reaction is removed when done.
+            message_types: List of LangGraph message types to process in streaming mode (default: ["AIMessageChunk"]).
+                Only applies to streaming mode. Non-streaming mode always processes the final response.
+                Available message types from LangChain:
+                - "ai": AIMessage (complete assistant response)
+                - "AIMessageChunk": AIMessageChunk (streaming assistant response chunks)
+                - "human": HumanMessage (user input)
+                - "system": SystemMessage (system prompts)
+                - "tool": ToolMessage (tool execution results)
+                Example: message_types=["AIMessageChunk", "tool"] to stream assistant responses and tool results
         """
         logger.info("Initializing SlackBot...")
 
@@ -98,6 +108,7 @@ class SlackBot:
         self.max_image_blocks = max_image_blocks
         self.include_metadata = include_metadata
         self.processing_reaction = processing_reaction
+        self.message_types = message_types if message_types is not None else ["AIMessageChunk"]
 
         # Initialize transformer chains
         self._input_transformers = TransformerChain()
@@ -136,6 +147,7 @@ class SlackBot:
                 extract_images=self.extract_images,
                 max_image_blocks=self.max_image_blocks,
                 metadata_builder=self._build_metadata,
+                message_types=self.message_types,
             )
             logger.info("Using StreamingHandler (low-latency streaming)")
         else:

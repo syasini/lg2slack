@@ -44,6 +44,7 @@ class StreamingHandler(BaseHandler):
         extract_images: bool = True,
         max_image_blocks: int = 5,
         metadata_builder=None,
+        message_types: list[str] = None,
     ):
         """Initialize streaming handler.
 
@@ -59,6 +60,7 @@ class StreamingHandler(BaseHandler):
             extract_images: Extract image markdown and render as blocks (default: True)
             max_image_blocks: Maximum number of image blocks to include (default: 5)
             metadata_builder: Async function to build metadata dict from MessageContext
+            message_types: List of message types to process (default: ["AIMessageChunk"])
         """
         # Initialize base class
         super().__init__(
@@ -75,6 +77,7 @@ class StreamingHandler(BaseHandler):
         self.slack_client = slack_client
         self.reply_in_thread = reply_in_thread
         self.metadata_builder = metadata_builder
+        self.message_types = message_types if message_types is not None else ["AIMessageChunk"]
 
     async def process_message(
         self,
@@ -211,9 +214,9 @@ class StreamingHandler(BaseHandler):
                 msg_type = message_data.get("type", "")
                 logger.debug(f"Chunk #{chunk_count}: message type={msg_type}")
 
-                # Skip non-AI messages (check for both "ai" and "AIMessageChunk")
-                if not (msg_type == "ai" or msg_type == "AIMessageChunk"):
-                    logger.debug(f"Chunk #{chunk_count}: skipping non-AI message")
+                # Skip messages not in the configured message_types list
+                if msg_type not in self.message_types:
+                    logger.debug(f"Chunk #{chunk_count}: skipping message type '{msg_type}' (not in {self.message_types})")
                     continue
 
                 # Get content from the chunk
