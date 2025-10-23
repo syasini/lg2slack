@@ -1,5 +1,9 @@
 # lg2slack
 
+[![PyPI version](https://badge.fury.io/py/lg2slack.svg)](https://badge.fury.io/py/lg2slack)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Simple, minimal package to connect LangGraph applications to Slack with just a few lines of code.
 
 ## Installation
@@ -10,37 +14,41 @@ pip install lg2slack
 
 ## Quick Start
 
-### 1. Create a Slack App
+### 1. Create a LangGraph App
 
-1. Go to https://api.slack.com/apps
-2. Click "Create New App" → "From a manifest"
-3. Copy the contents of `slack_manifest.yaml` from this repo
-4. Replace placeholder values:
-   - `your-app-name` → Your app name
-   - `your-deployment-url` → Your ngrok URL (local) or LangGraph Platform URL (production)
-5. Install the app to your workspace
-6. Copy the Bot Token and Signing Secret
-
-### 2. Configure Environment Variables
-
-Create a `.env` file:
-
-```bash
-# Slack credentials (from https://api.slack.com/apps -> Your App)
-SLACK_BOT_TOKEN=xoxb-your-bot-token
-SLACK_SIGNING_SECRET=your-signing-secret
-
-# LangGraph configuration
-ASSISTANT_ID=your-assistant-id
-
-# Optional: specify LangGraph URL (omit for loopback on platform)
-# LANGGRAPH_URL=http://localhost:8123
-```
-
-### 3. Create Your Bot
+First, create a simple LangGraph chatbot that will power your Slack bot:
 
 ```python
-# server.py
+# agent.py
+from langchain_anthropic import ChatAnthropic
+from langgraph.graph import MessagesState, StateGraph, START, END
+from langgraph.checkpoint.memory import MemorySaver
+
+# Define the chatbot function
+def chatbot(state: MessagesState):
+    model = ChatAnthropic(model="claude-3-5-sonnet-20241022")
+    return {"messages": [model.invoke(state["messages"])]}
+
+# Build the graph
+graph = StateGraph(MessagesState)
+graph.add_node("chatbot", chatbot)
+graph.add_edge(START, "chatbot")
+graph.add_edge("chatbot", END)
+
+# Compile with memory to maintain conversation history
+app = graph.compile(checkpointer=MemorySaver())
+```
+
+This creates a simple chatbot that maintains conversation history across messages.
+
+### 2. Create Your Slack Bot Server
+
+This is where the magic happens.
+
+Create a `slack/server.py` file in your project directory:
+
+```python
+# slack/server.py
 from lg2slack import SlackBot
 
 bot = SlackBot()
@@ -49,96 +57,66 @@ bot = SlackBot()
 app = bot.app
 ```
 
-That's it! Just 4 lines of code.
+That's it! Just 3 lines of code.
+
+### 3. Configure Environment Variables
+
+Create a `.env` file with your credentials:
+
+```bash
+# Slack credentials (from https://api.slack.com/apps -> Your App)
+SLACK_BOT_TOKEN=xoxb-your-bot-token
+SLACK_SIGNING_SECRET=your-signing-secret
+
+# LangGraph agent name
+# This is the key you will set in langgraph.json
+ASSISTANT_ID=my-assistant
+```
 
 ### 4. Configure LangGraph Deployment
 
-Add to your `langgraph.json`:
+Add your agent and Slack server paths to `langgraph.json`:
 
 ```json
 {
   "dependencies": ["lg2slack", "."],
   "graphs": {
-    "agent": "./your_agent.py:graph"
+    "my-assistant": "./agent.py:app"
   },
   "env": ".env",
   "http": {
-    "/events/slack": "server:app"
+    "/events/slack": "slack/server:app"
   }
 }
 ```
 
-### 5. Deploy
+## Local Testing
 
-```bash
-# Deploy to LangGraph Platform
-langgraph deploy
+Before deploying to production, test your bot locally using ngrok.
 
-# Your bot is now live! Chat with it in Slack by:
-# - Sending a DM to the bot
-# - @mentioning the bot in a channel
-```
+**Important:** You'll need **separate Slack apps** for local development and production deployment, since each environment has its own request URL where Slack sends events.
 
-## Advanced Usage
+### 1. Create a Slack App for Local Development
 
-### With Transformers
+- Go to https://api.slack.com/apps
+- Click "Create New App" → "From a manifest"
+- Copy the contents of `slack_manifest.yaml` from this repo
+- Replace placeholder values:
+   - `your-app-name` → Your app name (e.g., "My Bot - Local")
+   - `your-deployment-url` → This is your ngrok or Langgraph deployment URL. Leave as placeholder for now
+- Install the app to your workspace
+- Copy the Bot Token and Signing Secret to your `.env` file
 
-Customize message processing with input/output transformers:
-
-```python
-from lg2slack import SlackBot
-
-bot = SlackBot()
-
-# Add user context to messages
-@bot.transform_input
-async def add_context(message, context):
-    return f"User {context.user_id} in {context.channel_id}: {message}"
-
-# Add footer to responses
-@bot.transform_output
-async def add_footer(response, context):
-    return f"{response}\n\n_Powered by LangGraph_"
-
-app = bot.app
-```
-
-### Disable Streaming
-
-If you prefer non-streaming responses:
-
-```python
-bot = SlackBot(streaming=False)
-```
-
-### Multiple Transformers
-
-Transformers are applied in order:
-
-```python
-@bot.transform_input
-async def first_transform(message, context):
-    return f"[1] {message}"
-
-@bot.transform_input
-async def second_transform(message, context):
-    return f"[2] {message}"
-
-# Input "hello" becomes: "[2] [1] hello"
-```
-
-## Local Development
-
-### 1. Start LangGraph with your bot
+### 2. Start LangGraph Dev Server
 
 ```bash
 langgraph dev
-# This automatically runs on http://localhost:8123 and serves your custom routes
+# Runs on http://localhost:2024 and automatically mounts your FastAPI app
 ```
 
-Note: You don't need to run a separate server! LangGraph dev automatically imports and mounts your FastAPI app from `langgraph.json`.
+Note: You don't need to run a separate server! LangGraph dev automatically imports and serves the FastAPI app from your `langgraph.json`.
 
-### 2. Expose with ngrok
+### 3. Expose with ngrok
 
 Install ngrok if you haven't already:
 ```bash
@@ -150,130 +128,298 @@ brew install ngrok
 
 Start ngrok to expose your local server:
 ```bash
-ngrok http 8123
+ngrok http 2024
 ```
 
 This will output something like:
 ```
-Forwarding  https://abc123.ngrok.io -> http://localhost:8123
+Forwarding  https://abc123.ngrok.io -> http://localhost:2024
 ```
 
-**Tip:** You can view all requests in ngrok's web interface at http://localhost:4040
+**Tip:** View all requests in ngrok's web interface at http://localhost:4040
 
-### 3. Update Slack App
+### 4. Update Slack App Event URL
 
 Go to your Slack app settings → Event Subscriptions:
 - Request URL: `https://abc123.ngrok.io/events/slack` (use YOUR ngrok URL)
 - Slack will verify the URL - you should see a green checkmark
 
-### 4. Test
+### 5. Test Your Bot
 
 Send a DM to your bot or @mention it in a channel! You'll see requests in both:
 - LangGraph dev console
 - ngrok web interface (http://localhost:4040)
 
-## Configuration Options
 
-### SlackBot Parameters
+
+## Production Deployment
+
+Once local testing looks good, deploy to LangGraph Platform.
+
+### 1. Create a Production Slack App
+
+Create a **new** Slack app for production (separate from your local dev app):
+
+1. Go to https://api.slack.com/apps
+2. Click "Create New App" → "From a manifest"
+3. Use the same manifest, but name it differently (e.g., "My Bot - Production")
+4. After deployment, you'll update the request URL to your LangGraph Platform URL
+
+### 2. Update Environment Variables
+
+Update your `.env` file with the **production** Slack app credentials:
+
+```bash
+# Production Slack credentials
+SLACK_BOT_TOKEN=xoxb-your-production-bot-token
+SLACK_SIGNING_SECRET=your-production-signing-secret
+
+# LangGraph configuration
+ASSISTANT_ID=my-assistant
+```
+
+### 3. Deploy to LangGraph Platform
+
+```bash
+langgraph deploy
+```
+
+After deployment, you'll receive a URL like: `https://your-deployment.langraph.app`
+
+### 4. Update Production Slack App URL
+
+Go to your **production** Slack app settings → Event Subscriptions:
+- Request URL: `https://your-deployment.langraph.app/events/slack`
+
+Your bot is now live! Chat with it by:
+- Sending a DM to the bot
+- @mentioning the bot in a channel
+
+## Advanced Usage
+
+### Configuration Options
+
+The `SlackBot` class accepts many parameters to customize behavior:
 
 ```python
-SlackBot(
-    assistant_id: str = None,           # LangGraph assistant ID (or from env)
-    langgraph_url: str = None,          # LangGraph URL, None for loopback
-    streaming: bool = True,             # Enable streaming (default: True)
-    slack_bot_token: str = None,        # Override Slack token (or from env)
-    slack_signing_secret: str = None,   # Override Slack secret (or from env)
+bot = SlackBot(
+    # LangGraph settings
+    assistant_id="my-assistant",        # Or from env: ASSISTANT_ID
+    langgraph_url=None,                 # Or from env: LANGGRAPH_URL (None = loopback)
+
+    # Response settings
+    streaming=True,                     # Stream responses token-by-token (default: True)
+    reply_in_thread=True,               # Always reply in threads (default: True)
+
+    # Slack credentials (or from env)
+    slack_bot_token=None,               # From env: SLACK_BOT_TOKEN
+    slack_signing_secret=None,          # From env: SLACK_SIGNING_SECRET
+
+    # Feedback integration
+    show_feedback_buttons=False,        # Show thumbs up/down buttons (default: False)
+    enable_feedback_comments=False,     # Allow text feedback on negative reactions (default: False)
+    show_thread_id=False,               # Show LangGraph thread_id in footer (default: False)
+
+    # Image handling
+    extract_images=True,                # Convert markdown images to Slack blocks (default: True)
+    max_image_blocks=5,                 # Max images per message (default: 5)
+
+    # Metadata tracking
+    include_metadata=True,              # Pass Slack context to LangSmith (default: True)
+
+    # Visual feedback
+    processing_reaction="eyes",         # Show emoji while processing (default: None)
+                                        # Examples: "eyes", "hourglass", "robot_face"
+
+    # Message filtering (streaming only)
+    message_types=["AIMessageChunk"],   # Which message types to stream (default: ["AIMessageChunk"])
+                                        # Options: "AIMessageChunk", "ai", "tool", "human", "system"
 )
 ```
 
-### Environment Variables
+### Input/Output Transformers
 
-- `SLACK_BOT_TOKEN` - Required: Bot token from Slack
-- `SLACK_SIGNING_SECRET` - Required: Signing secret from Slack
-- `ASSISTANT_ID` - Required: LangGraph assistant ID
-- `LANGGRAPH_URL` - Optional: LangGraph deployment URL (None = loopback)
+Customize message processing with transformers:
+
+```python
+from lg2slack import SlackBot
+
+bot = SlackBot()
+
+# Transform user input before sending to LangGraph
+@bot.transform_input
+async def add_context(message: str, context) -> str:
+    return f"User {context.user_id} asks: {message}"
+
+# Transform AI output before sending to Slack
+@bot.transform_output
+async def add_footer(response: str, context) -> str:
+    return f"{response}\n\n_Powered by LangGraph_"
+
+app = bot.app
+```
+
+**Multiple transformers** are applied in registration order:
+
+```python
+@bot.transform_input
+async def first_transform(message: str, context) -> str:
+    return f"[1] {message}"
+
+@bot.transform_input
+async def second_transform(message: str, context) -> str:
+    return f"[2] {message}"
+
+# Input "hello" becomes: "[2] [1] hello"
+```
+
+### Metadata Transformers
+
+Customize what Slack context gets passed to LangSmith:
+
+```python
+bot = SlackBot(include_metadata=True)
+
+@bot.transform_metadata
+async def custom_metadata(context) -> dict:
+    """Customize metadata sent to LangSmith."""
+    return {
+        "channel_id": context.channel_id,
+        "is_dm": context.is_dm,
+        "user_id_hash": hash(context.user_id),  # Hash PII for privacy
+    }
+```
+
+By default, the following fields are passed:
+- `slack_user_id`
+- `slack_channel_id`
+- `slack_message_ts`
+- `slack_thread_ts`
+- `slack_channel_type`
+- `slack_is_dm`
+- `slack_is_thread`
+
+### Streaming Mode Control
+
+Control which message types to stream to users:
+
+```python
+# Stream only AI responses (default)
+bot = SlackBot(message_types=["AIMessageChunk"])
+
+# Stream AI responses AND tool calls
+bot = SlackBot(message_types=["AIMessageChunk", "tool"])
+
+# Stream everything (verbose!)
+bot = SlackBot(message_types=["AIMessageChunk", "ai", "tool", "system"])
+```
+
+### Processing Reaction
+
+Show a visual indicator while the bot is thinking:
+
+```python
+# Show eyes emoji while processing
+bot = SlackBot(processing_reaction="eyes")
+
+# Other options: "hourglass", "robot_face", "thinking_face", etc.
+# Must be emoji NAME, not the emoji character itself
+```
+
+The reaction is automatically removed when the response is ready.
+
+### Image Support
+
+The bot automatically extracts markdown images and renders them as Slack image blocks:
+
+```python
+# Enable image extraction (default)
+bot = SlackBot(extract_images=True, max_image_blocks=5)
+
+# Disable image extraction
+bot = SlackBot(extract_images=False)
+```
+
+When enabled, markdown like `![Plant](https://example.com/plant.jpg)` in AI responses will:
+1. Appear as text in the message
+2. Render as a native Slack image block below the text
+
+### Feedback Integration
+
+Collect user feedback and send it to LangSmith:
+
+```python
+bot = SlackBot(
+    show_feedback_buttons=True,         # Show thumbs up/down
+    enable_feedback_comments=True,      # Allow text feedback for negative reactions
+    show_thread_id=True,                # Show thread ID for debugging
+)
+```
 
 ## How It Works
 
 ### Architecture
 
 ```
-Slack → lg2slack → [INPUT] → LangGraph [Human Message]
-                                    ↓
-Slack ← lg2slack ← [OUTPUT] ← LangGraph [AI Message]
+Slack → lg2slack → [INPUT TRANSFORMERS] → LangGraph
+                                              ↓
+Slack ← lg2slack ← [OUTPUT TRANSFORMERS] ← LangGraph
 ```
 
 ### Message Flow
 
-1. User sends message in Slack (DM or @mention)
-2. Slack sends event to `/events/slack` endpoint
-3. lg2slack applies input transformers
-4. Message sent to LangGraph as Human Message
-5. LangGraph processes and generates AI Message
-6. LangGraph streams response chunks
-7. Each chunk immediately forwarded to Slack (low latency!)
-8. lg2slack applies output transformers
-9. Final message displayed in Slack
+1. **User sends message** in Slack (DM or @mention)
+2. **Slack sends event** to `/events/slack` endpoint
+3. **Input transformers** process the message
+4. **Message sent to LangGraph** as HumanMessage with thread_id
+5. **LangGraph processes** and generates response
+6. **Streaming mode:** Each token immediately forwarded to Slack
+7. **Output transformers** process the complete response
+8. **Final message** displayed in Slack with optional feedback buttons
 
 ### Thread Management
 
-lg2slack automatically manages conversation threads:
-- Slack threads map to LangGraph threads using format: `slack_{channel}_{timestamp}`
-- Same Slack thread always connects to same LangGraph conversation
-- LangGraph maintains conversation history
+lg2slack automatically manages conversation continuity:
 
-## Features
+- **Deterministic thread IDs:** Same Slack thread always maps to same LangGraph conversation using UUID5
+- **Conversation history:** LangGraph's MessagesState maintains full context
+- **Thread participation:** Bot auto-responds in threads where it has participated
+- **No database needed:** Thread mapping is deterministic and stateless
 
-### Streaming
+### Streaming vs Non-Streaming
 
-By default, lg2slack uses **true low-latency streaming**:
-- Each token from LangGraph is immediately sent to Slack
-- No waiting for complete response
+**Streaming mode (default):**
+- True low-latency streaming
+- Each token forwarded immediately to Slack
 - Better user experience with instant feedback
+- Uses Slack's `chat_startStream`, `chat_appendStream`, `chat_stopStream` APIs
 
-### Feedback (Coming Soon)
+**Non-streaming mode:**
+```python
+bot = SlackBot(streaming=False)
+```
+- Waits for complete response
+- Sends entire message at once
+- Useful for debugging or if streaming causes issues
 
-Integration with LangSmith for collecting user feedback on bot responses.
+## Feature Highlights
+
+- **Low-latency streaming** - Instant token-by-token responses
+- **LangSmith feedback integration** - Thumbs up/down buttons with optional text feedback
+- **Automatic image handling** - Converts markdown images to native Slack blocks
+- **Flexible transformers** - Customize inputs, outputs, and metadata
+- **Smart thread management** - Automatic conversation continuity across messages
+- **Processing reactions** - Visual feedback while bot is thinking
+- **Message type filtering** - Control verbosity by filtering AI chunks, tools, etc.
+- **Metadata tracking** - Automatic Slack context passed to LangSmith for analytics
 
 ## Examples
 
-See the `examples/` directory:
-- `basic.py` - Minimal setup
-- `with_transformers.py` - Using input/output transformers
+Check out the [`examples/plant_bot`](examples/plant_bot/) directory for a complete working example:
 
-## Troubleshooting
-
-### Bot doesn't respond
-
-1. Check Slack app Event Subscriptions URL is correct
-2. Verify bot is invited to the channel (for @mentions)
-3. Check logs: `langgraph dev` shows request logs
-4. Ensure environment variables are set correctly
-5. Check ngrok is running and forwarding correctly
-
-### "Missing required configuration"
-
-Make sure `.env` file exists with all required variables:
-- `SLACK_BOT_TOKEN`
-- `SLACK_SIGNING_SECRET`
-- `ASSISTANT_ID`
-
-### Streaming not working
-
-1. Verify LangGraph is returning messages in streaming mode
-2. Check that `streaming=True` (default)
-3. Ensure your LangGraph app has a `messages` state key
-
-### Local dev: "Connection refused"
-
-Make sure `langgraph dev` is running before starting ngrok.
-
-### ngrok URL keeps changing
-
-Free ngrok URLs change each time you restart. Options:
-- Use the new URL each time in Slack app settings
-- Get a ngrok account for a persistent subdomain
-- For production, deploy to LangGraph Platform (stable URL)
+- **[plant_agent.py](examples/plant_bot/plant_agent.py)** - LangGraph agent with conditional image search
+- **[slack_server.py](examples/plant_bot/slack_server.py)** - SlackBot setup with transformers
+- **[langgraph.json](examples/plant_bot/langgraph.json)** - Full deployment configuration
 
 ## Requirements
 
