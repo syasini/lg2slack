@@ -1,15 +1,8 @@
-# Houseplant Helper Example
+# Plant Bot
 
-A houseplant recommendation bot that demonstrates lg2slack integration with conditional tool routing.
+<img src="./media/logo.png" alt="logo" width="200">
 
-## Features
-
-- 🌱 Expert advice on houseplant care
-- 🔍 Web search (only when images needed)
-- 🖼️ Plant images on demand
-- ⚡ Fast streaming responses with low latency
-- 💬 Works in Slack DMs and channels
-- 📝 Automatic conversation history with thread-based persistence
+A 🌱 houseplant recommendation bot with 🖼️ 🔍 image search capabilities that demonstrates Langgraph and Slack integration using lg2slack.
 
 ## Quick Start
 
@@ -58,7 +51,7 @@ Open http://localhost:8503 and ask questions like:
    langgraph dev
    ```
 
-2. In another terminal, start ngrok:
+2. In another terminal, start ngrok on the same port as langgraph:
    ```bash
    ngrok http 2024
    ```
@@ -82,131 +75,32 @@ Open http://localhost:8503 and ask questions like:
    https://your-deployment.langgraph.app/events/slack
    ```
 
-3. Update `.env` to remove `LANGGRAPH_URL` (uses loopback on platform)
+3. copy `.env` to environmental variables on Langgraph (remove `LANGGRAPH_URL`).
+
+## How to Connect to Slack
+
+1. **Create Slack App**: Use [slack_manifest.yaml](./slack_manifest.yaml) to create your app at https://api.slack.com/apps
+
+2. **Add tokens to `.env`** (see [.env.example](./.env.example)):
+   - `SLACK_BOT_TOKEN` - From "OAuth & Permissions"
+   - `SLACK_SIGNING_SECRET` - From "Basic Information"
+
+3. **Update Event Subscriptions URL** in your Slack app settings with your ngrok/deployment URL (see step 4 above)
+
+That's it! The [slack_server.py](./slack_server.py) integration (just 4 lines!) handles all Slack events, streaming, threading, and image rendering.
 
 ## How It Works
 
-### Architecture
+<img src="./media/plant_bot.png" alt="Plant Bot LangGraph Diagram" width="500">
 
-```
-User Message → Claude Response → [Conditional] → Tavily Search → Claude Response (with images)
-                                      ↓
-                                    [End]
-```
+The bot uses **conditional routing** for speed:
+1. User asks about plants → Claude responds
+2. If images needed → Tavily searches → Claude adds images
+3. Otherwise → Done (fast!)
 
-The agent uses **conditional routing** for optimal performance:
-1. Receives user question about houseplants
-2. Claude generates initial response (fast!)
-3. **Conditional edge**: If user wants images, route to search node
-4. Tavily searches for plant images (only when needed)
-5. Claude generates final response with images
-6. Streams all responses for low latency
-
-This design keeps simple questions fast (no unnecessary search) while providing images on demand.
-
-### Files
-
-- `plant_agent.py` - LangGraph agent with conditional search routing
-  - Exports `graph` (for LangGraph Platform, no checkpointer)
-  - Exports `graph_with_checkpointer` (for local testing with persistence)
-- `slack_server.py` - lg2slack integration (just 4 lines!)
-- `streamlit_plant.py` - Local testing UI with thread-based conversation history
-- `langgraph.json` - LangGraph Platform configuration
-- `.env` - Environment variables (not in git)
-
-### Key Concepts
-
-**Thread-based persistence**: The agent uses LangGraph's built-in `MessagesState` with thread IDs for automatic conversation history tracking. Pass a config with thread_id:
-
-```python
-config = {"configurable": {"thread_id": "user_123"}}
-graph.stream({"messages": [HumanMessage(content=prompt)]}, config)
-```
-
-**Dual export pattern**: `plant_agent.py` exports two versions:
-- `graph` - For LangGraph Platform (persistence handled automatically)
-- `graph_with_checkpointer` - For local testing (uses `MemorySaver()`)
-
-This allows the same agent code to work both locally and on the platform.
-
-## Customization
-
-### Change the Agent Behavior
-
-Edit the system prompt in `plant_agent.py` to customize:
-- Types of plant information provided
-- Tone and style of responses
-- When to trigger image searches (currently uses "NEED_SEARCH:" prefix)
-
-### Add Conditional Routing
-
-The agent demonstrates conditional edges with `should_search()`. Add more conditional logic by:
-1. Adding state fields to `PlantAgentState`
-2. Creating decision functions like `should_search()`
-3. Using `add_conditional_edges()` in the workflow
-
-### Customize Slack Integration
-
-Use lg2slack transformers in `slack_server.py`:
-
-```python
-from lg2slack import SlackBot
-
-bot = SlackBot()
-
-@bot.transform_input
-async def add_context(message, context):
-    return f"User {context.user_id}: {message}"
-
-@bot.transform_output
-async def add_footer(response, context):
-    return f"{response}\n\n_Powered by LangGraph_"
-
-app = bot.app
-```
-
-## Troubleshooting
-
-### Images Not Showing
-
-The agent uses a "NEED_SEARCH:" prefix in responses to trigger image searches. Check that:
-- The system prompt includes the NEED_SEARCH instruction
-- The `respond_node` correctly parses the prefix
-- Tavily API key is set correctly
-
-### Slow Responses
-
-The agent is optimized for speed:
-- Claude Sonnet 3.7 (faster than Sonnet 4.5)
-- Conditional search (only when needed, not for every query)
-- Tavily set to `search_depth="basic"`
-- Token-by-token streaming with `stream_mode="messages"`
-
-### No Streaming in Streamlit
-
-Make sure you're using:
-- `stream_mode="messages"` (not "values")
-- Checking for `message.type == "AIMessageChunk"` during streaming
-- Accumulating tokens: `full_response += content` (not replacing)
-
-### Conversation History Not Working
-
-Check that:
-- You're passing `config = {"configurable": {"thread_id": "..."}}`
-- Using `graph_with_checkpointer` for local testing (not plain `graph`)
-- Thread ID is consistent across conversation turns
-
-### Slack Bot Not Responding
-
-1. Check ngrok is running and forwarding to port 2024
-2. Verify Slack Event Subscriptions URL is correct
-3. Check `langgraph dev` logs for errors
-4. Ensure bot is invited to the channel (for @mentions)
-5. Verify `ASSISTANT_ID` in `.env` is set to `plant_agent`
+All responses stream token-by-token for low latency.
 
 ## Learn More
 
 - [lg2slack Documentation](../../README.md)
 - [LangGraph Documentation](https://langchain-ai.github.io/langgraph/)
-- [LangGraph Persistence Guide](https://langchain-ai.github.io/langgraph/concepts/persistence/)
-- [Slack Bolt Documentation](https://slack.dev/bolt-python/)
