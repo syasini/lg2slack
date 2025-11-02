@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lg2slack"
-version = "0.1.5"
+version = "0.1.4"
 description = "Simple package to connect LangGraph applications to Slack"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,6 +28,7 @@ classifiers = [
 dependencies = [
     "fastapi>=0.100.0",
     "langgraph-sdk>=0.1.0",
+    "langsmith>=0.1.0",  
     "slack-bolt>=1.18.0",
     "aiohttp>=3.8.0",  # Required by slack-bolt for async support
     "pydantic>=2.0.0",

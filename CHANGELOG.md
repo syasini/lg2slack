@@ -7,7 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.5] - 2025-11-01
 ### Added
 - Automated release system with `scripts/release.sh` (supports patch/minor/major)
 - Python script `scripts/update_changelog.py` to automatically update CHANGELOG.md
@@ -18,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - README.md image URLs now use absolute GitHub URLs for proper PyPI display
 - README.md example links now point to GitHub repository
+- Added missing `langsmith>=0.1.0` dependency (required for feedback tracking)
 
 ### Changed
 - Release process now fully automated with version bumping, changelog updates, and PyPI publishing
