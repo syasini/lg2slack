@@ -68,14 +68,20 @@ def clean_markdown(text: str) -> str:
         >>> clean_markdown("Check [this link](https://example.com)")
         'Check <https://example.com|this link>'
     """
+    # URL pattern that handles parentheses in URLs
+    # Matches: non-paren chars OR balanced single-level parens like (text)
+    # This handles URLs like: https://wiki.org/File:Name_(detail).jpg
+    url_pattern = r"(?:[^()]|\([^()]*\))+"
+
     # Convert markdown links: [text](url) -> <url|text>
-    # Use non-greedy match and handle URLs with parentheses
-    text = re.sub(r"\[([^\]]+)\]\((.+?)\)", r"<\2|\1>", text)
+    # Changed [^\]]+ to [^\]]* to allow empty link text
+    # Use balanced parentheses pattern for URLs with parens
+    text = re.sub(rf"\[([^\]]*)\]\(({url_pattern})\)", r"<\2|\1>", text)
 
     # Convert markdown images: ![alt](url) -> !<url|alt>
     # Note: Slack doesn't render images inline in text, but this preserves the format
-    # Use non-greedy match to handle URLs with parentheses
-    text = re.sub(r"!\[([^\]]*)\]\((.+?)\)", r"!<\2|\1>", text)
+    # Use balanced parentheses pattern to handle URLs with parens
+    text = re.sub(rf"!\[([^\]]*)\]\(({url_pattern})\)", r"!<\2|\1>", text)
 
     # Clean up code blocks: remove language identifier after ```
     # Slack doesn't use language identifiers in the same way
@@ -121,21 +127,15 @@ def extract_markdown_images(text: str, max_images: int = None) -> List[Dict]:
 
     # Pattern matches: ![alt text](url)
     # Group 1: alt text (can be empty)
-    # Group 2: url - use greedy match to get everything until last )
-    # This handles URLs that may contain parentheses
-    pattern = r"!\[([^\]]*)\]\((.+)\)"
+    # Group 2: url - uses balanced parentheses pattern to handle URLs with parens
+    # URL pattern: non-paren chars OR balanced single-level parens like (text)
+    # This handles URLs like: https://wiki.org/File:Name_(detail).jpg
+    url_pattern = r"(?:[^()]|\([^()]*\))+"
+    pattern = rf"!\[([^\]]*)\]\(({url_pattern})\)"
 
-    # Find all image markdown patterns
-    # We need to be careful with URLs containing parentheses
-    matches = []
-    remaining_text = text
-    while True:
-        match = re.search(pattern, remaining_text)
-        if not match:
-            break
-        matches.append((match.group(1), match.group(2)))
-        # Remove this match and continue searching
-        remaining_text = remaining_text[match.end():]
+    # Find all image markdown patterns using findall (simpler than manual iteration)
+    # findall returns list of tuples: [(alt1, url1), (alt2, url2), ...]
+    matches = re.findall(pattern, text)
 
     logger.info(f"Searching for markdown images in text (length={len(text)})")
     logger.info(f"Full text to search: {text}")
