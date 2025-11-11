@@ -184,8 +184,11 @@ class SlackBot:
         # Create FastAPI app
         self._app = self._create_fastapi_app()
 
-        # Get bot user ID (needed for mention detection)
+        # Slack metadata cache (lazy initialization)
         self._bot_user_id: Optional[str] = None
+        self._team_id: Optional[str] = None
+        self._slack_metadata_lock = asyncio.Lock()
+        self._slack_metadata_initialized = False
 
         logger.info("SlackBot initialization complete")
 
@@ -402,6 +405,28 @@ class SlackBot:
             r for r in self.reactions
             if r.get("target") == target and r.get("when") == when
         ]
+
+    async def _ensure_slack_metadata(self) -> None:
+        """Ensure Slack metadata (bot_user_id, team_id) is cached.
+
+        Uses lazy initialization with lock to prevent race conditions.
+        Fetches metadata once on first call, then caches for all subsequent calls.
+        This eliminates redundant auth_test() API calls on every message.
+        """
+        if self._slack_metadata_initialized:
+            return  # Already initialized
+
+        async with self._slack_metadata_lock:
+            # Double-check after acquiring lock (another task might have initialized)
+            if self._slack_metadata_initialized:
+                return
+
+            logger.info("Fetching Slack metadata (bot_user_id, team_id) via auth_test()...")
+            auth_info = await self.slack_app.client.auth_test()
+            self._bot_user_id = auth_info["user_id"]
+            self._team_id = auth_info["team_id"]
+            self._slack_metadata_initialized = True
+            logger.info(f"Cached Slack metadata: bot_user_id={self._bot_user_id}, team_id={self._team_id}")
 
     def _create_fastapi_app(self) -> FastAPI:
         """Create FastAPI app with Slack routes.
@@ -871,11 +896,8 @@ class SlackBot:
         if event.get("bot_id"):
             return False
 
-        # Get bot user ID if we don't have it yet
-        if not self._bot_user_id:
-            auth_info = await self.slack_app.client.auth_test()
-            self._bot_user_id = auth_info["user_id"]
-            logger.info(f"Bot user ID: {self._bot_user_id}")
+        # Ensure Slack metadata is cached (fetches once, then cached forever)
+        await self._ensure_slack_metadata()
 
         # Check if this is a DM
         if is_dm(event):

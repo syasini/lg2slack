@@ -79,6 +79,11 @@ class StreamingHandler(BaseHandler):
         self.metadata_builder = metadata_builder
         self.message_types = message_types if message_types is not None else ["AIMessageChunk"]
 
+        # Slack team_id cache (lazy initialization)
+        self._team_id: Optional[str] = None
+        self._team_id_lock = asyncio.Lock()
+        self._team_id_initialized = False
+
     async def process_message(
         self,
         message: str,
@@ -467,7 +472,11 @@ class StreamingHandler(BaseHandler):
             logger.error(f"Failed to stop stream: {e}", exc_info=True)
 
     async def _get_team_id(self) -> str:
-        """Get Slack team/workspace ID.
+        """Get Slack team/workspace ID (cached after first call).
+
+        Uses lazy initialization with lock to prevent race conditions.
+        Fetches team_id once on first call, then caches for all subsequent calls.
+        This eliminates redundant auth_test() API calls on every message.
 
         Returns:
             Team ID string
@@ -475,13 +484,25 @@ class StreamingHandler(BaseHandler):
         Raises:
             Exception: If auth test fails
         """
-        try:
-            auth_info = await self.slack_client.client.auth_test()
-            return auth_info["team_id"]
+        if self._team_id_initialized:
+            return self._team_id  # Return cached value
 
-        except Exception as e:
-            logger.error(f"Failed to get team ID: {e}", exc_info=True)
-            raise
+        async with self._team_id_lock:
+            # Double-check after acquiring lock (another task might have initialized)
+            if self._team_id_initialized:
+                return self._team_id
+
+            try:
+                logger.info("Fetching Slack team_id via auth_test()...")
+                auth_info = await self.slack_client.client.auth_test()
+                self._team_id = auth_info["team_id"]
+                self._team_id_initialized = True
+                logger.info(f"Cached Slack team_id: {self._team_id}")
+                return self._team_id
+
+            except Exception as e:
+                logger.error(f"Failed to get team ID: {e}", exc_info=True)
+                raise
 
     async def _add_reaction(
         self,
