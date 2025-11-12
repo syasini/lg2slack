@@ -79,6 +79,44 @@ class StreamingHandler(BaseHandler):
         self.metadata_builder = metadata_builder
         self.message_types = message_types if message_types is not None else ["AIMessageChunk"]
 
+        # Slack team_id cache (lazy initialization)
+        self._team_id: Optional[str] = None
+        self._team_id_lock = asyncio.Lock()
+        self._team_id_initialized = False
+
+        # Background task tracking for proper cleanup
+        self._background_tasks: set[asyncio.Task] = set()
+
+    def _create_background_task(self, coro) -> asyncio.Task:
+        """Create a background task with automatic cleanup.
+
+        Tracks the task in _background_tasks set and automatically removes it
+        when done. This ensures proper lifecycle management and prevents memory leaks.
+
+        Args:
+            coro: Coroutine to run as background task
+
+        Returns:
+            Created asyncio.Task
+        """
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
+
+    async def cleanup(self) -> None:
+        """Cancel all background tasks and wait for cleanup.
+
+        Call this during graceful shutdown to ensure all background operations
+        complete or are properly cancelled.
+        """
+        if self._background_tasks:
+            logger.info(f"Cancelling {len(self._background_tasks)} background tasks...")
+            for task in self._background_tasks:
+                task.cancel()
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            logger.info("All background tasks cancelled")
+
     async def process_message(
         self,
         message: str,
@@ -130,10 +168,16 @@ class StreamingHandler(BaseHandler):
         )
         logger.info(f"Started Slack stream with ts: {stream_ts}")
 
-        # Add bot-processing reactions to the streaming message
+        # Start bot-processing reactions in background (don't block LangGraph)
         bot_processing_reactions = [r for r in bot_reactions if r.get("target") == "bot" and r.get("when") == "processing"]
-        for reaction in bot_processing_reactions:
-            await self._add_reaction(context.channel_id, stream_ts, reaction.get("emoji"))
+        if bot_processing_reactions:
+            self._create_background_task(
+                self._add_reactions_parallel(
+                    bot_processing_reactions,
+                    context.channel_id,
+                    stream_ts
+                )
+            )
 
         try:
             # Step 6: Stream from LangGraph and forward to Slack
@@ -154,10 +198,14 @@ class StreamingHandler(BaseHandler):
                 thread_id=langgraph_thread,
             )
 
-            # Add bot-complete reactions after streaming completes
+            # Add bot-complete reactions after streaming completes (parallel)
             bot_complete_reactions = [r for r in bot_reactions if r.get("target") == "bot" and r.get("when") == "complete"]
-            for reaction in bot_complete_reactions:
-                await self._add_reaction(context.channel_id, stream_ts, reaction.get("emoji"))
+            if bot_complete_reactions:
+                await self._add_reactions_parallel(
+                    bot_complete_reactions,
+                    context.channel_id,
+                    stream_ts
+                )
 
             logger.info(f"Completed streaming for thread {langgraph_thread}")
 
@@ -467,7 +515,11 @@ class StreamingHandler(BaseHandler):
             logger.error(f"Failed to stop stream: {e}", exc_info=True)
 
     async def _get_team_id(self) -> str:
-        """Get Slack team/workspace ID.
+        """Get Slack team/workspace ID (cached after first call).
+
+        Uses lazy initialization with lock to prevent race conditions.
+        Fetches team_id once on first call, then caches for all subsequent calls.
+        This eliminates redundant auth_test() API calls on every message.
 
         Returns:
             Team ID string
@@ -475,13 +527,25 @@ class StreamingHandler(BaseHandler):
         Raises:
             Exception: If auth test fails
         """
-        try:
-            auth_info = await self.slack_client.client.auth_test()
-            return auth_info["team_id"]
+        if self._team_id_initialized:
+            return self._team_id  # Return cached value
 
-        except Exception as e:
-            logger.error(f"Failed to get team ID: {e}", exc_info=True)
-            raise
+        async with self._team_id_lock:
+            # Double-check after acquiring lock (another task might have initialized)
+            if self._team_id_initialized:
+                return self._team_id
+
+            try:
+                logger.info("Fetching Slack team_id via auth_test()...")
+                auth_info = await self.slack_client.client.auth_test()
+                self._team_id = auth_info["team_id"]
+                self._team_id_initialized = True
+                logger.info(f"Cached Slack team_id: {self._team_id}")
+                return self._team_id
+
+            except Exception as e:
+                logger.error(f"Failed to get team ID: {e}", exc_info=True)
+                raise
 
     async def _add_reaction(
         self,
@@ -528,3 +592,33 @@ class StreamingHandler(BaseHandler):
             logger.debug(f"Removed reaction :{emoji}: from message {channel_id}:{message_ts}")
         except Exception as e:
             logger.warning(f"Failed to remove reaction :{emoji}:: {e}")
+
+    async def _add_reactions_parallel(
+        self,
+        reactions: list[dict],
+        channel_id: str,
+        message_ts: str,
+    ) -> None:
+        """Add multiple reactions in parallel with error handling.
+
+        This method adds all reactions concurrently using asyncio.gather,
+        which is much faster than sequential addition when multiple reactions
+        are configured.
+
+        Args:
+            reactions: List of reaction config dicts (with "emoji" key)
+            channel_id: Slack channel ID
+            message_ts: Slack message timestamp
+        """
+        if not reactions:
+            return
+
+        try:
+            # Add all reactions concurrently
+            await asyncio.gather(
+                *[self._add_reaction(channel_id, message_ts, r.get("emoji"))
+                  for r in reactions],
+                return_exceptions=True  # Don't fail entire batch if one fails
+            )
+        except Exception as e:
+            logger.error(f"Parallel reactions failed: {e}", exc_info=True)

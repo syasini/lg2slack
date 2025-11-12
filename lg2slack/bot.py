@@ -184,8 +184,14 @@ class SlackBot:
         # Create FastAPI app
         self._app = self._create_fastapi_app()
 
-        # Get bot user ID (needed for mention detection)
+        # Slack metadata cache (lazy initialization)
         self._bot_user_id: Optional[str] = None
+        self._team_id: Optional[str] = None
+        self._slack_metadata_lock = asyncio.Lock()
+        self._slack_metadata_initialized = False
+
+        # Background task tracking for proper cleanup
+        self._background_tasks: set[asyncio.Task] = set()
 
         logger.info("SlackBot initialization complete")
 
@@ -204,6 +210,36 @@ class SlackBot:
             FastAPI app instance
         """
         return self._app
+
+    def _create_background_task(self, coro) -> asyncio.Task:
+        """Create a background task with automatic cleanup.
+
+        Tracks the task in _background_tasks set and automatically removes it
+        when done. This ensures proper lifecycle management and prevents memory leaks.
+
+        Args:
+            coro: Coroutine to run as background task
+
+        Returns:
+            Created asyncio.Task
+        """
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
+
+    async def cleanup(self) -> None:
+        """Cancel all background tasks and wait for cleanup.
+
+        Call this during graceful shutdown to ensure all background operations
+        complete or are properly cancelled.
+        """
+        if self._background_tasks:
+            logger.info(f"Cancelling {len(self._background_tasks)} background tasks...")
+            for task in self._background_tasks:
+                task.cancel()
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            logger.info("All background tasks cancelled")
 
     def transform_input(self, func: Callable) -> Callable:
         """Decorator to add an input transformer.
@@ -403,6 +439,28 @@ class SlackBot:
             if r.get("target") == target and r.get("when") == when
         ]
 
+    async def _ensure_slack_metadata(self) -> None:
+        """Ensure Slack metadata (bot_user_id, team_id) is cached.
+
+        Uses lazy initialization with lock to prevent race conditions.
+        Fetches metadata once on first call, then caches for all subsequent calls.
+        This eliminates redundant auth_test() API calls on every message.
+        """
+        if self._slack_metadata_initialized:
+            return  # Already initialized
+
+        async with self._slack_metadata_lock:
+            # Double-check after acquiring lock (another task might have initialized)
+            if self._slack_metadata_initialized:
+                return
+
+            logger.info("Fetching Slack metadata (bot_user_id, team_id) via auth_test()...")
+            auth_info = await self.slack_app.client.auth_test()
+            self._bot_user_id = auth_info["user_id"]
+            self._team_id = auth_info["team_id"]
+            self._slack_metadata_initialized = True
+            logger.info(f"Cached Slack metadata: bot_user_id={self._bot_user_id}, team_id={self._team_id}")
+
     def _create_fastapi_app(self) -> FastAPI:
         """Create FastAPI app with Slack routes.
 
@@ -491,11 +549,18 @@ class SlackBot:
             if self._bot_user_id:
                 message_text = message_text.replace(f"<@{self._bot_user_id}>", "").strip()
 
-            # Add user-processing reactions
+            # Start user-processing reactions in background (don't block handler)
             user_processing_reactions = self._get_reactions_for("user", "processing")
-            for reaction in user_processing_reactions:
-                await self._add_reaction(context.channel_id, context.message_ts, reaction.get("emoji"))
+            if user_processing_reactions:
+                self._create_background_task(
+                    self._add_reactions_parallel(
+                        user_processing_reactions,
+                        context.channel_id,
+                        context.message_ts
+                    )
+                )
 
+            success = False
             try:
                 # Process based on handler type
                 if self.streaming_enabled:
@@ -507,10 +572,14 @@ class SlackBot:
                         bot_reactions=self.reactions,  # Pass reactions for bot message handling
                     )
 
-                    # Add user-complete reactions after streaming completes
+                    # Add user-complete reactions after streaming completes (parallel)
                     user_complete_reactions = self._get_reactions_for("user", "complete")
-                    for reaction in user_complete_reactions:
-                        await self._add_reaction(context.channel_id, context.message_ts, reaction.get("emoji"))
+                    if user_complete_reactions:
+                        await self._add_reactions_parallel(
+                            user_complete_reactions,
+                            context.channel_id,
+                            context.message_ts
+                        )
 
                     # Store mapping for feedback
                     if run_id and stream_ts:
@@ -522,6 +591,8 @@ class SlackBot:
                         logger.info(f"Stored feedback mapping: {message_key} -> thread_id={thread_id}, run_id={run_id}")
                     else:
                         logger.warning(f"No run_id captured for streaming message")
+
+                    success = True
 
                 else:
                     # Non-streaming: handler returns response, we send it
@@ -635,10 +706,14 @@ class SlackBot:
                     else:
                         logger.warning(f"No run_id captured for non-streaming message")
 
-                    # Add user-complete reactions
+                    # Add user-complete reactions (parallel)
                     user_complete_reactions = self._get_reactions_for("user", "complete")
-                    for reaction in user_complete_reactions:
-                        await self._add_reaction(context.channel_id, context.message_ts, reaction.get("emoji"))
+                    if user_complete_reactions:
+                        await self._add_reactions_parallel(
+                            user_complete_reactions,
+                            context.channel_id,
+                            context.message_ts
+                        )
 
                     # Remove bot-processing reactions and add bot-complete reactions
                     if result and result.get("ts"):
@@ -647,16 +722,24 @@ class SlackBot:
                             if not reaction.get("persist", False):
                                 await self._remove_reaction(context.channel_id, result["ts"], reaction.get("emoji"))
 
-                        # Add bot-complete reactions to the bot's response
+                        # Add bot-complete reactions to the bot's response (parallel)
                         bot_complete_reactions = self._get_reactions_for("bot", "complete")
-                        for reaction in bot_complete_reactions:
-                            await self._add_reaction(context.channel_id, result["ts"], reaction.get("emoji"))
+                        if bot_complete_reactions:
+                            await self._add_reactions_parallel(
+                                bot_complete_reactions,
+                                context.channel_id,
+                                result["ts"]
+                            )
+
+                    success = True
 
             finally:
-                # Remove all non-persistent user reactions
-                for reaction in self.reactions:
-                    if reaction.get("target") == "user" and not reaction.get("persist", False):
-                        await self._remove_reaction(context.channel_id, context.message_ts, reaction.get("emoji"))
+                # Only remove non-persistent user reactions on success
+                # On error, keep them as visual indicators that something went wrong
+                if success:
+                    for reaction in self.reactions:
+                        if reaction.get("target") == "user" and not reaction.get("persist", False):
+                            await self._remove_reaction(context.channel_id, context.message_ts, reaction.get("emoji"))
 
         # Handler for app_mention events (when bot is @mentioned)
         @self.slack_app.event("app_mention")
@@ -849,6 +932,36 @@ class SlackBot:
         except Exception as e:
             logger.warning(f"Failed to remove reaction :{emoji}:: {e}")
 
+    async def _add_reactions_parallel(
+        self,
+        reactions: list[dict],
+        channel_id: str,
+        message_ts: str,
+    ) -> None:
+        """Add multiple reactions in parallel with error handling.
+
+        This method adds all reactions concurrently using asyncio.gather,
+        which is much faster than sequential addition when multiple reactions
+        are configured.
+
+        Args:
+            reactions: List of reaction config dicts (with "emoji" key)
+            channel_id: Slack channel ID
+            message_ts: Slack message timestamp
+        """
+        if not reactions:
+            return
+
+        try:
+            # Add all reactions concurrently
+            await asyncio.gather(
+                *[self._add_reaction(channel_id, message_ts, r.get("emoji"))
+                  for r in reactions],
+                return_exceptions=True  # Don't fail entire batch if one fails
+            )
+        except Exception as e:
+            logger.error(f"Parallel reactions failed: {e}", exc_info=True)
+
     async def _should_process_message(self, event: dict) -> bool:
         """Determine if we should process this message.
 
@@ -871,11 +984,8 @@ class SlackBot:
         if event.get("bot_id"):
             return False
 
-        # Get bot user ID if we don't have it yet
-        if not self._bot_user_id:
-            auth_info = await self.slack_app.client.auth_test()
-            self._bot_user_id = auth_info["user_id"]
-            logger.info(f"Bot user ID: {self._bot_user_id}")
+        # Ensure Slack metadata is cached (fetches once, then cached forever)
+        await self._ensure_slack_metadata()
 
         # Check if this is a DM
         if is_dm(event):
