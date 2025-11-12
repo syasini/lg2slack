@@ -84,6 +84,39 @@ class StreamingHandler(BaseHandler):
         self._team_id_lock = asyncio.Lock()
         self._team_id_initialized = False
 
+        # Background task tracking for proper cleanup
+        self._background_tasks: set[asyncio.Task] = set()
+
+    def _create_background_task(self, coro) -> asyncio.Task:
+        """Create a background task with automatic cleanup.
+
+        Tracks the task in _background_tasks set and automatically removes it
+        when done. This ensures proper lifecycle management and prevents memory leaks.
+
+        Args:
+            coro: Coroutine to run as background task
+
+        Returns:
+            Created asyncio.Task
+        """
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
+
+    async def cleanup(self) -> None:
+        """Cancel all background tasks and wait for cleanup.
+
+        Call this during graceful shutdown to ensure all background operations
+        complete or are properly cancelled.
+        """
+        if self._background_tasks:
+            logger.info(f"Cancelling {len(self._background_tasks)} background tasks...")
+            for task in self._background_tasks:
+                task.cancel()
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            logger.info("All background tasks cancelled")
+
     async def process_message(
         self,
         message: str,
@@ -138,7 +171,7 @@ class StreamingHandler(BaseHandler):
         # Start bot-processing reactions in background (don't block LangGraph)
         bot_processing_reactions = [r for r in bot_reactions if r.get("target") == "bot" and r.get("when") == "processing"]
         if bot_processing_reactions:
-            asyncio.create_task(
+            self._create_background_task(
                 self._add_reactions_parallel(
                     bot_processing_reactions,
                     context.channel_id,

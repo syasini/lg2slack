@@ -190,6 +190,9 @@ class SlackBot:
         self._slack_metadata_lock = asyncio.Lock()
         self._slack_metadata_initialized = False
 
+        # Background task tracking for proper cleanup
+        self._background_tasks: set[asyncio.Task] = set()
+
         logger.info("SlackBot initialization complete")
 
     @property
@@ -207,6 +210,36 @@ class SlackBot:
             FastAPI app instance
         """
         return self._app
+
+    def _create_background_task(self, coro) -> asyncio.Task:
+        """Create a background task with automatic cleanup.
+
+        Tracks the task in _background_tasks set and automatically removes it
+        when done. This ensures proper lifecycle management and prevents memory leaks.
+
+        Args:
+            coro: Coroutine to run as background task
+
+        Returns:
+            Created asyncio.Task
+        """
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
+
+    async def cleanup(self) -> None:
+        """Cancel all background tasks and wait for cleanup.
+
+        Call this during graceful shutdown to ensure all background operations
+        complete or are properly cancelled.
+        """
+        if self._background_tasks:
+            logger.info(f"Cancelling {len(self._background_tasks)} background tasks...")
+            for task in self._background_tasks:
+                task.cancel()
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            logger.info("All background tasks cancelled")
 
     def transform_input(self, func: Callable) -> Callable:
         """Decorator to add an input transformer.
@@ -519,7 +552,7 @@ class SlackBot:
             # Start user-processing reactions in background (don't block handler)
             user_processing_reactions = self._get_reactions_for("user", "processing")
             if user_processing_reactions:
-                asyncio.create_task(
+                self._create_background_task(
                     self._add_reactions_parallel(
                         user_processing_reactions,
                         context.channel_id,
@@ -527,6 +560,7 @@ class SlackBot:
                     )
                 )
 
+            success = False
             try:
                 # Process based on handler type
                 if self.streaming_enabled:
@@ -557,6 +591,8 @@ class SlackBot:
                         logger.info(f"Stored feedback mapping: {message_key} -> thread_id={thread_id}, run_id={run_id}")
                     else:
                         logger.warning(f"No run_id captured for streaming message")
+
+                    success = True
 
                 else:
                     # Non-streaming: handler returns response, we send it
@@ -695,11 +731,15 @@ class SlackBot:
                                 result["ts"]
                             )
 
+                    success = True
+
             finally:
-                # Remove all non-persistent user reactions
-                for reaction in self.reactions:
-                    if reaction.get("target") == "user" and not reaction.get("persist", False):
-                        await self._remove_reaction(context.channel_id, context.message_ts, reaction.get("emoji"))
+                # Only remove non-persistent user reactions on success
+                # On error, keep them as visual indicators that something went wrong
+                if success:
+                    for reaction in self.reactions:
+                        if reaction.get("target") == "user" and not reaction.get("persist", False):
+                            await self._remove_reaction(context.channel_id, context.message_ts, reaction.get("emoji"))
 
         # Handler for app_mention events (when bot is @mentioned)
         @self.slack_app.event("app_mention")
