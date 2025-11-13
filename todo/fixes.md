@@ -35,7 +35,7 @@ This file tracks critical bugs and code smells that need fixing.
 ## 🟡 Medium Priority
 
 ### ✅ Issue #2: Import Inside Function (stream.py)
-**Status:** Pending
+**Status:** ✅ Complete (commit: e2c6fbe)
 **Branch:** `claude/fix-import-stream-011CUomKh1oKXEihWTyV7Sra`
 **Severity:** MEDIUM
 **Files Affected:** `handlers/stream.py` (line 513)
@@ -89,7 +89,7 @@ def extract_markdown_images(text: str, ...):
 ## 📋 Checklist
 
 - [x] Issue #1: Extract duplicate reaction methods
-- [ ] Issue #2: Move import re to module level
+- [x] Issue #2: Move import re to module level
 - [ ] Issue #3: Switch to loguru logging
 
 ---
