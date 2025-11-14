@@ -19,6 +19,7 @@ from .config import BotConfig, MessageContext
 from .handlers import MessageHandler, StreamingHandler
 from .transformers import TransformerChain
 from .utils import is_bot_mention, is_dm, create_feedback_modal, extract_feedback_text
+from .mixins import ReactionMixin
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,8 @@ class SlackBot:
         processing_reaction: Optional[str] = None,
         reactions: Optional[list[dict]] = None,
         message_types: Optional[list[str]] = None,
+        stream_buffer_time: float = 0.1,
+        stream_buffer_max_chunks: int = 10,
     ):
         """Initialize SlackBot.
 
@@ -99,6 +102,20 @@ class SlackBot:
                 - "system": SystemMessage (system prompts)
                 - "tool": ToolMessage (tool execution results)
                 Example: message_types=["AIMessageChunk", "tool"] to stream assistant responses and tool results
+            stream_buffer_time: Time in seconds to buffer chunks before flushing to Slack (default: 0.1).
+                Buffers chunks for this duration before sending to reduce API call overhead.
+                The buffer flushes when EITHER this time elapses OR stream_buffer_max_chunks is reached
+                (whichever happens first). Lower values = more responsive but more API calls.
+                Recommended range: 0.05-0.2 seconds.
+                Example: 0.05 = flush every 50ms (more API calls, lower latency)
+                         0.2 = flush every 200ms (fewer API calls, slightly higher latency)
+            stream_buffer_max_chunks: Maximum chunks to buffer before force-flushing (default: 10).
+                Safety limit to prevent accumulating too many small chunks between time-based flushes.
+                The buffer flushes when EITHER stream_buffer_time elapses OR this limit is reached
+                (whichever happens first). Useful when LangGraph sends many tiny chunks rapidly.
+                Recommended range: 5-20 chunks.
+                Example: 5 = flush after 5 chunks (more API calls, handles tiny chunks)
+                         20 = flush after 20 chunks (fewer API calls, batches more aggressively)
         """
         logger.info("Initializing SlackBot...")
 
@@ -147,6 +164,9 @@ class SlackBot:
         )
         logger.info("Slack app initialized")
 
+        # Initialize reaction mixin for shared reaction operations
+        self._reactions = ReactionMixin(self.slack_app.client)
+
         # Create appropriate handler based on streaming setting
         if self.streaming_enabled:
             self.handler = StreamingHandler(
@@ -162,6 +182,8 @@ class SlackBot:
                 max_image_blocks=self.max_image_blocks,
                 metadata_builder=self._build_metadata,
                 message_types=self.message_types,
+                stream_buffer_time=stream_buffer_time,
+                stream_buffer_max_chunks=stream_buffer_max_chunks,
             )
             logger.info("Using StreamingHandler (low-latency streaming)")
         else:
@@ -553,7 +575,7 @@ class SlackBot:
             user_processing_reactions = self._get_reactions_for("user", "processing")
             if user_processing_reactions:
                 self._create_background_task(
-                    self._add_reactions_parallel(
+                    self._reactions.add_parallel(
                         user_processing_reactions,
                         context.channel_id,
                         context.message_ts
@@ -575,7 +597,7 @@ class SlackBot:
                     # Add user-complete reactions after streaming completes (parallel)
                     user_complete_reactions = self._get_reactions_for("user", "complete")
                     if user_complete_reactions:
-                        await self._add_reactions_parallel(
+                        await self._reactions.add_parallel(
                             user_complete_reactions,
                             context.channel_id,
                             context.message_ts
@@ -619,7 +641,7 @@ class SlackBot:
                         # Add bot-processing reactions to placeholder
                         if placeholder_ts:
                             for reaction in bot_processing_reactions:
-                                await self._add_reaction(context.channel_id, placeholder_ts, reaction.get("emoji"))
+                                await self._reactions.add(context.channel_id, placeholder_ts, reaction.get("emoji"))
 
                     logger.info("Non-streaming mode: calling handler.process_message")
                     response_text, blocks, thread_id, run_id = await self.handler.process_message(message_text, context)
@@ -720,7 +742,7 @@ class SlackBot:
                         # Remove bot-processing reactions if not persistent
                         for reaction in bot_processing_reactions:
                             if not reaction.get("persist", False):
-                                await self._remove_reaction(context.channel_id, result["ts"], reaction.get("emoji"))
+                                await self._reactions.remove(context.channel_id, result["ts"], reaction.get("emoji"))
 
                         # Add bot-complete reactions to the bot's response (parallel)
                         bot_complete_reactions = self._get_reactions_for("bot", "complete")
@@ -739,7 +761,7 @@ class SlackBot:
                 if success:
                     for reaction in self.reactions:
                         if reaction.get("target") == "user" and not reaction.get("persist", False):
-                            await self._remove_reaction(context.channel_id, context.message_ts, reaction.get("emoji"))
+                            await self._reactions.remove(context.channel_id, context.message_ts, reaction.get("emoji"))
 
         # Handler for app_mention events (when bot is @mentioned)
         @self.slack_app.event("app_mention")
@@ -885,82 +907,6 @@ class SlackBot:
         )
 
         logger.info(f"Feedback submitted successfully for run {run_id}")
-
-    async def _add_reaction(
-        self,
-        channel_id: str,
-        message_ts: str,
-        emoji: str,
-    ) -> None:
-        """Add emoji reaction to a Slack message.
-
-        Args:
-            channel_id: Slack channel ID
-            message_ts: Slack message timestamp
-            emoji: Emoji name (without colons, e.g., "eyes", "hourglass")
-        """
-        try:
-            await self.slack_app.client.reactions_add(
-                channel=channel_id,
-                timestamp=message_ts,
-                name=emoji,
-            )
-            logger.debug(f"Added reaction :{emoji}: to message {channel_id}:{message_ts}")
-        except Exception as e:
-            logger.warning(f"Failed to add reaction :{emoji}:: {e}")
-
-    async def _remove_reaction(
-        self,
-        channel_id: str,
-        message_ts: str,
-        emoji: str,
-    ) -> None:
-        """Remove emoji reaction from a Slack message.
-
-        Args:
-            channel_id: Slack channel ID
-            message_ts: Slack message timestamp
-            emoji: Emoji name (without colons, e.g., "eyes", "hourglass")
-        """
-        try:
-            await self.slack_app.client.reactions_remove(
-                channel=channel_id,
-                timestamp=message_ts,
-                name=emoji,
-            )
-            logger.debug(f"Removed reaction :{emoji}: from message {channel_id}:{message_ts}")
-        except Exception as e:
-            logger.warning(f"Failed to remove reaction :{emoji}:: {e}")
-
-    async def _add_reactions_parallel(
-        self,
-        reactions: list[dict],
-        channel_id: str,
-        message_ts: str,
-    ) -> None:
-        """Add multiple reactions in parallel with error handling.
-
-        This method adds all reactions concurrently using asyncio.gather,
-        which is much faster than sequential addition when multiple reactions
-        are configured.
-
-        Args:
-            reactions: List of reaction config dicts (with "emoji" key)
-            channel_id: Slack channel ID
-            message_ts: Slack message timestamp
-        """
-        if not reactions:
-            return
-
-        try:
-            # Add all reactions concurrently
-            await asyncio.gather(
-                *[self._add_reaction(channel_id, message_ts, r.get("emoji"))
-                  for r in reactions],
-                return_exceptions=True  # Don't fail entire batch if one fails
-            )
-        except Exception as e:
-            logger.error(f"Parallel reactions failed: {e}", exc_info=True)
 
     async def _should_process_message(self, event: dict) -> bool:
         """Determine if we should process this message.
