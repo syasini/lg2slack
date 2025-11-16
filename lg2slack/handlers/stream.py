@@ -12,6 +12,7 @@ from typing import Optional
 from ..config import MessageContext
 from ..transformers import TransformerChain
 from ..utils import clean_markdown
+from ..mixins import ReactionMixin
 from .base import BaseHandler
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,9 @@ class StreamingHandler(BaseHandler):
         # Background task tracking for proper cleanup
         self._background_tasks: set[asyncio.Task] = set()
 
+        # Initialize reaction mixin for shared reaction operations
+        self._reactions = ReactionMixin(self.slack_client.client)
+
     def _create_background_task(self, coro) -> asyncio.Task:
         """Create a background task with automatic cleanup.
 
@@ -183,7 +187,7 @@ class StreamingHandler(BaseHandler):
         bot_processing_reactions = [r for r in bot_reactions if r.get("target") == "bot" and r.get("when") == "processing"]
         if bot_processing_reactions:
             self._create_background_task(
-                self._add_reactions_parallel(
+                self._reactions.add_parallel(
                     bot_processing_reactions,
                     context.channel_id,
                     stream_ts
@@ -212,7 +216,7 @@ class StreamingHandler(BaseHandler):
             # Add bot-complete reactions after streaming completes (parallel)
             bot_complete_reactions = [r for r in bot_reactions if r.get("target") == "bot" and r.get("when") == "complete"]
             if bot_complete_reactions:
-                await self._add_reactions_parallel(
+                await self._reactions.add_parallel(
                     bot_complete_reactions,
                     context.channel_id,
                     stream_ts
@@ -226,7 +230,69 @@ class StreamingHandler(BaseHandler):
             # Remove all non-persistent bot reactions
             for reaction in bot_reactions:
                 if reaction.get("target") == "bot" and not reaction.get("persist", False):
-                    await self._remove_reaction(context.channel_id, stream_ts, reaction.get("emoji"))
+                    await self._reactions.remove(context.channel_id, stream_ts, reaction.get("emoji"))
+
+    def _should_flush_buffer(
+        self,
+        buffer: list[str],
+        last_flush_time: float,
+    ) -> bool:
+        """Determine if buffer should be flushed to Slack.
+
+        Flushes when EITHER condition is met:
+        1. Enough time has elapsed since last flush (stream_buffer_time)
+        2. Buffer has accumulated too many chunks (stream_buffer_max_chunks)
+
+        These work together as safety limits - whichever is reached first triggers the flush.
+        Typical behavior: time limit triggers for normal streaming, chunk limit catches edge cases.
+
+        Args:
+            buffer: List of content chunks accumulated
+            last_flush_time: Timestamp of last flush
+
+        Returns:
+            True if buffer should be flushed
+        """
+        if not buffer:
+            return False
+
+        # Calculate time elapsed
+        time_since_flush = time.time() - last_flush_time
+
+        # Check flush conditions (time OR chunk count)
+        return (
+            time_since_flush >= self.stream_buffer_time or
+            len(buffer) >= self.stream_buffer_max_chunks
+        )
+
+    async def _flush_buffer(
+        self,
+        buffer: list[str],
+        channel_id: str,
+        stream_ts: str,
+    ) -> None:
+        """Flush accumulated buffer to Slack stream.
+
+        Args:
+            buffer: List of content chunks to flush
+            channel_id: Slack channel ID
+            stream_ts: Stream timestamp
+        """
+        if not buffer:
+            return
+
+        # Combine all buffered chunks
+        combined_content = "".join(buffer)
+
+        # Send to Slack
+        await self._append_to_slack_stream(
+            channel_id=channel_id,
+            stream_ts=stream_ts,
+            content=combined_content,
+        )
+
+        # Clear buffer
+        buffer.clear()
 
     def _should_flush_buffer(
         self,
@@ -637,78 +703,3 @@ class StreamingHandler(BaseHandler):
                 logger.error(f"Failed to get team ID: {e}", exc_info=True)
                 raise
 
-    async def _add_reaction(
-        self,
-        channel_id: str,
-        message_ts: str,
-        emoji: str,
-    ) -> None:
-        """Add emoji reaction to a Slack message.
-
-        Args:
-            channel_id: Slack channel ID
-            message_ts: Slack message timestamp
-            emoji: Emoji name (without colons, e.g., "eyes", "hourglass")
-        """
-        try:
-            await self.slack_client.client.reactions_add(
-                channel=channel_id,
-                timestamp=message_ts,
-                name=emoji,
-            )
-            logger.debug(f"Added reaction :{emoji}: to message {channel_id}:{message_ts}")
-        except Exception as e:
-            logger.warning(f"Failed to add reaction :{emoji}:: {e}")
-
-    async def _remove_reaction(
-        self,
-        channel_id: str,
-        message_ts: str,
-        emoji: str,
-    ) -> None:
-        """Remove emoji reaction from a Slack message.
-
-        Args:
-            channel_id: Slack channel ID
-            message_ts: Slack message timestamp
-            emoji: Emoji name (without colons, e.g., "eyes", "hourglass")
-        """
-        try:
-            await self.slack_client.client.reactions_remove(
-                channel=channel_id,
-                timestamp=message_ts,
-                name=emoji,
-            )
-            logger.debug(f"Removed reaction :{emoji}: from message {channel_id}:{message_ts}")
-        except Exception as e:
-            logger.warning(f"Failed to remove reaction :{emoji}:: {e}")
-
-    async def _add_reactions_parallel(
-        self,
-        reactions: list[dict],
-        channel_id: str,
-        message_ts: str,
-    ) -> None:
-        """Add multiple reactions in parallel with error handling.
-
-        This method adds all reactions concurrently using asyncio.gather,
-        which is much faster than sequential addition when multiple reactions
-        are configured.
-
-        Args:
-            reactions: List of reaction config dicts (with "emoji" key)
-            channel_id: Slack channel ID
-            message_ts: Slack message timestamp
-        """
-        if not reactions:
-            return
-
-        try:
-            # Add all reactions concurrently
-            await asyncio.gather(
-                *[self._add_reaction(channel_id, message_ts, r.get("emoji"))
-                  for r in reactions],
-                return_exceptions=True  # Don't fail entire batch if one fails
-            )
-        except Exception as e:
-            logger.error(f"Parallel reactions failed: {e}", exc_info=True)
