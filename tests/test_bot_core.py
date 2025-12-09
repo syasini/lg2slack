@@ -287,19 +287,18 @@ class TestReactionHelpers:
     @pytest.mark.asyncio
     async def test_add_reaction_success(self, minimal_bot):
         """Should successfully add emoji reaction to message."""
-        # Mock Slack client
-        mock_slack_client = MagicMock()
-        mock_slack_client.client.reactions_add = AsyncMock()
-        minimal_bot.slack_app = mock_slack_client
+        # Mock the ReactionMixin's Slack client
+        mock_slack_client = AsyncMock()
+        minimal_bot._reactions._slack_client = mock_slack_client
 
-        await minimal_bot._add_reaction(
+        await minimal_bot._reactions.add(
             channel_id="C123CHANNEL",
             message_ts="1234567.890",
             emoji="eyes"
         )
 
         # Verify reactions_add was called correctly
-        mock_slack_client.client.reactions_add.assert_called_once_with(
+        mock_slack_client.reactions_add.assert_called_once_with(
             channel="C123CHANNEL",
             timestamp="1234567.890",
             name="eyes"
@@ -308,15 +307,15 @@ class TestReactionHelpers:
     @pytest.mark.asyncio
     async def test_add_reaction_failure_does_not_raise(self, minimal_bot):
         """Should log warning but NOT raise if adding reaction fails."""
-        # Mock Slack client to fail
-        mock_slack_client = MagicMock()
-        mock_slack_client.client.reactions_add = AsyncMock(
+        # Mock the ReactionMixin's Slack client to fail
+        mock_slack_client = AsyncMock()
+        mock_slack_client.reactions_add = AsyncMock(
             side_effect=Exception("Slack API error")
         )
-        minimal_bot.slack_app = mock_slack_client
+        minimal_bot._reactions._slack_client = mock_slack_client
 
         # Should NOT raise - just logs warning
-        await minimal_bot._add_reaction(
+        await minimal_bot._reactions.add(
             channel_id="C123",
             message_ts="1234567.890",
             emoji="hourglass"
@@ -327,19 +326,18 @@ class TestReactionHelpers:
     @pytest.mark.asyncio
     async def test_remove_reaction_success(self, minimal_bot):
         """Should successfully remove emoji reaction from message."""
-        # Mock Slack client
-        mock_slack_client = MagicMock()
-        mock_slack_client.client.reactions_remove = AsyncMock()
-        minimal_bot.slack_app = mock_slack_client
+        # Mock the ReactionMixin's Slack client
+        mock_slack_client = AsyncMock()
+        minimal_bot._reactions._slack_client = mock_slack_client
 
-        await minimal_bot._remove_reaction(
+        await minimal_bot._reactions.remove(
             channel_id="C123CHANNEL",
             message_ts="1234567.890",
             emoji="eyes"
         )
 
         # Verify reactions_remove was called correctly
-        mock_slack_client.client.reactions_remove.assert_called_once_with(
+        mock_slack_client.reactions_remove.assert_called_once_with(
             channel="C123CHANNEL",
             timestamp="1234567.890",
             name="eyes"
@@ -348,15 +346,15 @@ class TestReactionHelpers:
     @pytest.mark.asyncio
     async def test_remove_reaction_failure_does_not_raise(self, minimal_bot):
         """Should log warning but NOT raise if removing reaction fails."""
-        # Mock Slack client to fail
-        mock_slack_client = MagicMock()
-        mock_slack_client.client.reactions_remove = AsyncMock(
+        # Mock the ReactionMixin's Slack client to fail
+        mock_slack_client = AsyncMock()
+        mock_slack_client.reactions_remove = AsyncMock(
             side_effect=Exception("Slack API error")
         )
-        minimal_bot.slack_app = mock_slack_client
+        minimal_bot._reactions._slack_client = mock_slack_client
 
         # Should NOT raise - just logs warning
-        await minimal_bot._remove_reaction(
+        await minimal_bot._reactions.remove(
             channel_id="C123",
             message_ts="1234567.890",
             emoji="hourglass"
@@ -367,15 +365,15 @@ class TestReactionHelpers:
     @pytest.mark.asyncio
     async def test_reaction_helpers_with_different_emojis(self, minimal_bot):
         """Should handle various emoji names correctly."""
-        mock_slack_client = MagicMock()
-        mock_slack_client.client.reactions_add = AsyncMock()
-        minimal_bot.slack_app = mock_slack_client
+        # Mock the ReactionMixin's Slack client
+        mock_slack_client = AsyncMock()
+        minimal_bot._reactions._slack_client = mock_slack_client
 
         emojis = ["eyes", "hourglass", "robot_face", "white_check_mark", "x"]
 
         for emoji in emojis:
-            await minimal_bot._add_reaction("C123", "1234567.890", emoji)
+            await minimal_bot._reactions.add("C123", "1234567.890", emoji)
 
             # Verify emoji name was passed correctly (without colons)
-            call_kwargs = mock_slack_client.client.reactions_add.call_args.kwargs
+            call_kwargs = mock_slack_client.reactions_add.call_args.kwargs
             assert call_kwargs["name"] == emoji
