@@ -4,8 +4,8 @@ This module implements true streaming where LangGraph chunks are immediately
 forwarded to Slack as they arrive, minimizing latency.
 """
 
-import logging
 import asyncio
+import logging
 import time
 from typing import Optional
 
@@ -153,7 +153,9 @@ class StreamingHandler(BaseHandler):
         """
         if bot_reactions is None:
             bot_reactions = []
-        logger.info(f"Streaming message from user {context.user_id} in channel {context.channel_id}")
+        logger.info(
+            f"Streaming message from user {context.user_id} in channel {context.channel_id}"
+        )
 
         # Step 1: Apply input transformers
         transformed_input = await self._apply_input_transforms(message, context)
@@ -184,13 +186,13 @@ class StreamingHandler(BaseHandler):
         logger.info(f"Started Slack stream with ts: {stream_ts}")
 
         # Start bot-processing reactions in background (don't block LangGraph)
-        bot_processing_reactions = [r for r in bot_reactions if r.get("target") == "bot" and r.get("when") == "processing"]
+        bot_processing_reactions = [
+            r for r in bot_reactions if r.get("target") == "bot" and r.get("when") == "processing"
+        ]
         if bot_processing_reactions:
             self._create_background_task(
                 self._reactions.add_parallel(
-                    bot_processing_reactions,
-                    context.channel_id,
-                    stream_ts
+                    bot_processing_reactions, context.channel_id, stream_ts
                 )
             )
 
@@ -214,12 +216,12 @@ class StreamingHandler(BaseHandler):
             )
 
             # Add bot-complete reactions after streaming completes (parallel)
-            bot_complete_reactions = [r for r in bot_reactions if r.get("target") == "bot" and r.get("when") == "complete"]
+            bot_complete_reactions = [
+                r for r in bot_reactions if r.get("target") == "bot" and r.get("when") == "complete"
+            ]
             if bot_complete_reactions:
                 await self._reactions.add_parallel(
-                    bot_complete_reactions,
-                    context.channel_id,
-                    stream_ts
+                    bot_complete_reactions, context.channel_id, stream_ts
                 )
 
             logger.info(f"Completed streaming for thread {langgraph_thread}")
@@ -230,7 +232,9 @@ class StreamingHandler(BaseHandler):
             # Remove all non-persistent bot reactions
             for reaction in bot_reactions:
                 if reaction.get("target") == "bot" and not reaction.get("persist", False):
-                    await self._reactions.remove(context.channel_id, stream_ts, reaction.get("emoji"))
+                    await self._reactions.remove(
+                        context.channel_id, stream_ts, reaction.get("emoji")
+                    )
 
     def _should_flush_buffer(
         self,
@@ -261,8 +265,8 @@ class StreamingHandler(BaseHandler):
 
         # Check flush conditions (time OR chunk count)
         return (
-            time_since_flush >= self.stream_buffer_time or
-            len(buffer) >= self.stream_buffer_max_chunks
+            time_since_flush >= self.stream_buffer_time
+            or len(buffer) >= self.stream_buffer_max_chunks
         )
 
     async def _flush_buffer(
@@ -323,8 +327,8 @@ class StreamingHandler(BaseHandler):
 
         # Check flush conditions (time OR chunk count)
         return (
-            time_since_flush >= self.stream_buffer_time or
-            len(buffer) >= self.stream_buffer_max_chunks
+            time_since_flush >= self.stream_buffer_time
+            or len(buffer) >= self.stream_buffer_max_chunks
         )
 
     async def _flush_buffer(
@@ -398,9 +402,7 @@ class StreamingHandler(BaseHandler):
             async for chunk in self.langgraph_client.runs.stream(
                 thread_id=langgraph_thread,
                 assistant_id=self.assistant_id,
-                input={
-                    "messages": [{"role": "user", "content": message}]
-                },
+                input={"messages": [{"role": "user", "content": message}]},
                 stream_mode=["messages-tuple"],
                 multitask_strategy="interrupt",
                 if_not_exists="create",
@@ -412,7 +414,11 @@ class StreamingHandler(BaseHandler):
                 # Capture run_id from metadata chunks (appears before message chunks)
                 if run_id is None:
                     # Check if this is a metadata event with run_id
-                    if hasattr(chunk, "data") and isinstance(chunk.data, dict) and "run_id" in chunk.data:
+                    if (
+                        hasattr(chunk, "data")
+                        and isinstance(chunk.data, dict)
+                        and "run_id" in chunk.data
+                    ):
                         run_id = chunk.data["run_id"]
                         logger.info(f"Captured run_id: {run_id}")
 
@@ -428,7 +434,9 @@ class StreamingHandler(BaseHandler):
 
                 # Skip messages not in the configured message_types list
                 if msg_type not in self.message_types:
-                    logger.debug(f"Chunk #{chunk_count}: skipping message type '{msg_type}' (not in {self.message_types})")
+                    logger.debug(
+                        f"Chunk #{chunk_count}: skipping message type '{msg_type}' (not in {self.message_types})"
+                    )
                     continue
 
                 # Get content from the chunk
@@ -441,8 +449,12 @@ class StreamingHandler(BaseHandler):
 
                 # Handle both string and list content
                 if isinstance(content, list):
-                    content = "".join([block.get("text", "") for block in content if block.get("type") == "text"])
-                    logger.debug(f"Chunk #{chunk_count}: extracted from list, length={len(content)}")
+                    content = "".join(
+                        [block.get("text", "") for block in content if block.get("type") == "text"]
+                    )
+                    logger.debug(
+                        f"Chunk #{chunk_count}: extracted from list, length={len(content)}"
+                    )
 
                 # Skip empty content
                 if not content.strip():
@@ -452,7 +464,9 @@ class StreamingHandler(BaseHandler):
                 # Track complete response for image extraction
                 # IMPORTANT: Accumulate chunks, don't replace!
                 complete_response += content
-                logger.debug(f"Chunk #{chunk_count}: buffering {len(content)} chars (total accumulated: {len(complete_response)})")
+                logger.debug(
+                    f"Chunk #{chunk_count}: buffering {len(content)} chars (total accumulated: {len(complete_response)})"
+                )
 
                 # Add to buffer
                 buffer.append(content)
@@ -494,10 +508,7 @@ class StreamingHandler(BaseHandler):
         # This ensures transformers see the full context
         if complete_response:
             logger.debug(f"Applying output transforms to {len(complete_response)} chars")
-            complete_response = await self.output_transformers.apply(
-                complete_response,
-                context
-            )
+            complete_response = await self.output_transformers.apply(complete_response, context)
             logger.debug(f"After transforms: {len(complete_response)} chars")
 
         if run_id:
@@ -610,19 +621,14 @@ class StreamingHandler(BaseHandler):
 
                 # Remove image markdown from text (since we're showing them as image blocks)
                 import re
+
                 text_without_images = re.sub(r"!\[([^\]]*)\]\(.+?\)", "", complete_response)
 
                 # Convert to Slack block format (for_blocks=True converts **bold** -> *bold*, etc.)
                 slack_text = clean_markdown(text_without_images, for_blocks=True)
 
                 # Create a text section block to preserve the streamed content
-                text_block = {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": slack_text
-                    }
-                }
+                text_block = {"type": "section", "text": {"type": "mrkdwn", "text": slack_text}}
 
                 # Prepend text block to preserve streamed content, then add images + feedback
                 all_blocks = [text_block] + blocks
@@ -646,6 +652,7 @@ class StreamingHandler(BaseHandler):
 
                     # Get only feedback blocks (no image blocks)
                     from ..utils import create_feedback_block
+
                     feedback_only_blocks = create_feedback_block(
                         thread_id=thread_id,
                         show_feedback_buttons=self.show_feedback_buttons,
@@ -702,4 +709,3 @@ class StreamingHandler(BaseHandler):
             except Exception as e:
                 logger.error(f"Failed to get team ID: {e}", exc_info=True)
                 raise
-
