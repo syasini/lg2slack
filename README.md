@@ -1,5 +1,25 @@
 # lg2slack
 
+> **⚠️ DEPRECATION NOTICE**
+>
+> This package has been renamed to **[langgraph2slack](https://github.com/syasini/langgraph2slack)**.
+>
+> Please migrate to the new package:
+> ```bash
+> uv pip uninstall lg2slack
+> uv pip install langgraph2slack
+> ```
+>
+> Update your imports:
+> ```python
+> from langgraph2slack import SlackBot  # instead of lg2slack
+> ```
+>
+> This package (lg2slack) will continue to work but **will not receive updates**.
+> All future development happens in [langgraph2slack](https://pypi.org/project/langgraph2slack/).
+
+---
+
 [![PyPI version](https://badge.fury.io/py/lg2slack.svg)](https://badge.fury.io/py/lg2slack)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)

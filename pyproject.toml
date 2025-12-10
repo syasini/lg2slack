@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lg2slack"
-version = "0.2.0"
-description = "Simple package to connect LangGraph applications to Slack"
+version = "0.2.1"
+description = "[DEPRECATED] Use 'langgraph2slack' instead. Simple package to connect LangGraph applications to Slack"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}

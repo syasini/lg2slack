@@ -1,5 +1,21 @@
 """lg2slack - Simple LangGraph to Slack integration.
 
+⚠️  DEPRECATION WARNING ⚠️
+This package has been renamed to 'langgraph2slack'.
+Please update your dependencies:
+
+    uv pip uninstall lg2slack
+    uv pip install langgraph2slack
+
+And update your imports:
+
+    from langgraph2slack import SlackBot  # instead of lg2slack
+
+This package will continue to work but will not receive updates.
+All future development happens in the 'langgraph2slack' package.
+
+---
+
 This package provides an easy way to connect LangGraph applications to Slack
 with minimal configuration. Just create a SlackBot, optionally add transformers,
 and export the FastAPI app to langgraph.json.
@@ -15,6 +31,17 @@ Example:
 
     app = bot.app  # Export to langgraph.json
 """
+
+import warnings
+
+# Issue deprecation warning on import
+warnings.warn(
+    "lg2slack has been renamed to langgraph2slack. "
+    "Please update your dependencies: uv pip install langgraph2slack. "
+    "This package will not receive further updates.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 from .bot import SlackBot
 from .config import BotConfig, MessageContext
